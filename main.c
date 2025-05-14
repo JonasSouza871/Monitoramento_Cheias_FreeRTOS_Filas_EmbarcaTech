@@ -112,16 +112,16 @@ void vDisplayTask(void *pvParameters) {
             ssd1306_fill(&display, false);
 
             //Linha 1: Qnt Chuva: [valor] mm/h
-            snprintf(buffer, sizeof(buffer), "QntChuva:%.2fmm/h", recebido.volume_chuva_mm_h);
+            snprintf(buffer, sizeof(buffer), "QntChuva:%.2fmm", recebido.volume_chuva_mm_h);
             ssd1306_draw_string(&display, buffer, 0, 0, false);
 
             // Linha 2: Chuva: [valor] %
-            snprintf(buffer, sizeof(buffer), "Chuva: %.1f%%", recebido.volume_chuva_percent);
-            ssd1306_draw_string(&display, buffer, 0, 10, false);
+            snprintf(buffer, sizeof(buffer), "Chuva: %.1f %%", recebido.volume_chuva_percent);
+            ssd1306_draw_string(&display, buffer, 0, 13, false);
 
-            //Linha 3: Nivel Agua: [valor] %
-            snprintf(buffer, sizeof(buffer), "Nivel Agua: %.1f%%", recebido.nivel_agua_percent);
-            ssd1306_draw_string(&display, buffer, 0, 20, false); // Y=20
+            // Linha 3: Nivel Agua: [valor] %
+            snprintf(buffer, sizeof(buffer), "Nivel: %.1f %%", recebido.nivel_agua_percent);
+            ssd1306_draw_string(&display, buffer, 0, 26, false);
 
             //Linha 4: Status (Normal ou ALERTA)
             if (recebido.alerta_risco_enchente) {
@@ -129,7 +129,7 @@ void vDisplayTask(void *pvParameters) {
             } else {
                 snprintf(buffer, sizeof(buffer), "Status: Normal");
             }
-            ssd1306_draw_string(&display, buffer, 0, 30, false); // Y=30
+            ssd1306_draw_string(&display, buffer, 0, 39, false);
 
             //Linha 5: Cor: (Mostra Verde se modo normal, Vermelho se alerta) e indicador visual
             const char* cor_texto;
@@ -142,9 +142,9 @@ void vDisplayTask(void *pvParameters) {
                 cor_texto = "Cor: Verde";
                 preencher_rect = false;
             }
-            ssd1306_draw_string(&display, cor_texto, 0, 40, false); // Y=40
+            ssd1306_draw_string(&display, cor_texto, 0, 52, false);
         
-            //Envia o buffer de RAM para o display físico
+            //Envia o buffer de Downtown para o display físico
             ssd1306_send_data(&display);
         }
     }
