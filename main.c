@@ -15,7 +15,7 @@
 #define SSD1306_I2C_ADDR   0x3C // Endereço I2C comum para SSD1306
 #define SSD1306_WIDTH      128
 #define SSD1306_HEIGHT     64
-
+#define BUTTON_A_PIN 5
 //Definição dos pinos do joystick
 #define ADC_JOYSTICK_X_PIN 27 //GPIO 27 → ADC1 (nível de água)
 #define ADC_JOYSTICK_Y_PIN 26 //GPIO 26 → ADC0 (volume de chuva)
@@ -103,52 +103,115 @@ void vJoystickTask(void *pvParameters) {
 //Tarefa que consome os dados da fila e exibe no display OLED
 void vDisplayTask(void *pvParameters) {
     sensor_data_t recebido;
-    char buffer[32]; // Buffer para formatação de strings
-
+    char buffer[32];
+    bool second_screen_active = false;  // Começa com a primeira tela
+    
+    // Inicializa o Botão A
+    gpio_init(BUTTON_A_PIN);
+    gpio_set_dir(BUTTON_A_PIN, GPIO_IN);
+    gpio_pull_up(BUTTON_A_PIN);
+    
+    // Variáveis para debounce do botão
+    bool previous_button_state = true;  // Pull-up ativo, então estado padrão é HIGH
+    uint32_t last_press_time = 0;
+    const uint32_t debounce_delay = 300;  // 300ms de debounce
+    
     while (true) {
-        //Espera até receber um dado da fila
-        if (xQueueReceive(xQueueSensorData, &recebido, portMAX_DELAY) == pdPASS) {
-            //Limpa o buffer do display
-            ssd1306_fill(&display, false);
-
-            //Linha 1: Qnt Chuva: [valor] mm/h
-            snprintf(buffer, sizeof(buffer), "QntChuva:%.2fmm", recebido.volume_chuva_mm_h);
-            ssd1306_draw_string(&display, buffer, 0, 0, false);
-
-            // Linha 2: Chuva: [valor] %
-            snprintf(buffer, sizeof(buffer), "Chuva: %.1f %%", recebido.volume_chuva_percent);
-            ssd1306_draw_string(&display, buffer, 0, 13, false);
-
-            // Linha 3: Nivel Agua: [valor] %
-            snprintf(buffer, sizeof(buffer), "Nivel: %.1f %%", recebido.nivel_agua_percent);
-            ssd1306_draw_string(&display, buffer, 0, 26, false);
-
-            //Linha 4: Status (Normal ou ALERTA)
-            if (recebido.alerta_risco_enchente) {
-                snprintf(buffer, sizeof(buffer), "Status: ALERTA!");
-            } else {
-                snprintf(buffer, sizeof(buffer), "Status: Normal");
-            }
-            ssd1306_draw_string(&display, buffer, 0, 39, false);
-
-            //Linha 5: Cor: (Mostra Verde se modo normal, Vermelho se alerta) e indicador visual
-            const char* cor_texto;
-            bool preencher_rect;
-
-            if (recebido.alerta_risco_enchente) {
-                cor_texto = "Cor: Vermelho";
-                preencher_rect = true;
-            } else {
-                cor_texto = "Cor: Verde";
-                preencher_rect = false;
-            }
-            ssd1306_draw_string(&display, cor_texto, 0, 52, false);
+        // Lógica de detecção e debounce do botão
+        bool current_button_state = gpio_get(BUTTON_A_PIN);
+        uint32_t current_time = to_ms_since_boot(get_absolute_time());
         
-            //Envia o buffer de Downtown para o display físico
+        // Detecta pressionamento do botão (borda de descida) com debounce
+        if (previous_button_state && !current_button_state && 
+            (current_time - last_press_time > debounce_delay)) {
+            
+            second_screen_active = !second_screen_active;  // Alterna entre telas
+            last_press_time = current_time;
+        }
+        previous_button_state = current_button_state;
+        
+        // Espera até receber um dado da fila
+        if (xQueueReceive(xQueueSensorData, &recebido, pdMS_TO_TICKS(50)) == pdPASS) {
+            // Limpa o buffer do display
+            ssd1306_fill(&display, false);
+            
+            if (second_screen_active) {
+                // SEGUNDA TELA - Barras de progresso
+                
+                // Linha 1: Barra Chuva:
+                ssd1306_draw_string(&display, "Barra Chuva:", 0, 0, false);
+                
+                // Desenha barra de porcentagem de chuva (10px abaixo do texto)
+                uint8_t bar_y = 10;
+                uint8_t bar_width = 100;
+                uint8_t bar_height = 8;
+                
+                // Desenha contorno da barra
+                ssd1306_rect(&display, bar_y, 0, bar_width, bar_height, true, false);
+                
+                // Calcula largura de preenchimento e desenha parte preenchida
+                uint8_t rain_fill = (uint8_t)(recebido.volume_chuva_percent * (bar_width - 2) / 100.0f);
+                if (rain_fill > 0) {
+                    ssd1306_rect(&display, bar_y + 1, 1, rain_fill, bar_height - 2, true, true);
+                }
+                
+                // Linha 2: Barra Nível:
+                ssd1306_draw_string(&display, "Barra Nivel:", 0, 25, false);
+                
+                // Desenha barra de porcentagem do nível de água
+                uint8_t nivel_y = 35;
+                
+                // Desenha contorno da barra
+                ssd1306_rect(&display, nivel_y, 0, bar_width, bar_height, true, false);
+                
+                // Calcula largura de preenchimento e desenha parte preenchida
+                uint8_t nivel_fill = (uint8_t)(recebido.nivel_agua_percent * (bar_width - 2) / 100.0f);
+                if (nivel_fill > 0) {
+                    ssd1306_rect(&display, nivel_y + 1, 1, nivel_fill, bar_height - 2, true, true);
+                }
+                
+                // Linha 3: Previsão (espaço reservado para implementação futura)
+                ssd1306_draw_string(&display, "Previsao:", 0, 50, false);
+                
+            } else {
+                // PRIMEIRA TELA - Display original
+                
+                // Linha 1: Qnt Chuva: [valor] mm/h
+                snprintf(buffer, sizeof(buffer), "QntChuva:%.2fmm", recebido.volume_chuva_mm_h);
+                ssd1306_draw_string(&display, buffer, 0, 0, false);
+
+                // Linha 2: Chuva: [valor] %
+                snprintf(buffer, sizeof(buffer), "Chuva: %.1f %%", recebido.volume_chuva_percent);
+                ssd1306_draw_string(&display, buffer, 0, 13, false);
+
+                // Linha 3: Nivel Agua: [valor] %
+                snprintf(buffer, sizeof(buffer), "Nivel: %.1f %%", recebido.nivel_agua_percent);
+                ssd1306_draw_string(&display, buffer, 0, 26, false);
+
+                // Linha 4: Status (Normal ou ALERTA)
+                if (recebido.alerta_risco_enchente) {
+                    snprintf(buffer, sizeof(buffer), "Status: ALERTA!");
+                } else {
+                    snprintf(buffer, sizeof(buffer), "Status: Normal");
+                }
+                ssd1306_draw_string(&display, buffer, 0, 39, false);
+
+                // Linha 5: Cor
+                const char* cor_texto;
+                if (recebido.alerta_risco_enchente) {
+                    cor_texto = "Cor: Vermelho";
+                } else {
+                    cor_texto = "Cor: Verde";
+                }
+                ssd1306_draw_string(&display, cor_texto, 0, 52, false);
+            }
+        
+            // Envia o buffer atualizado para o display físico
             ssd1306_send_data(&display);
         }
     }
 }
+
 
 //Função principal
 int main() {
