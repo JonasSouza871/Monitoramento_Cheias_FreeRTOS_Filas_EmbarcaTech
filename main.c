@@ -7,6 +7,7 @@
 #include "task.h"
 #include "queue.h"
 #include "ssd1306.h"
+#include "matriz_led.h"
 
 // DEFINIÇÕES DO DISPLAY OLED
 #define I2C_PORT i2c1
@@ -51,7 +52,7 @@ static int contagemHistorico = 0;  // Quantidade de dados no histórico
 // Buffers para dados dos gráficos (percentual de chuva e nível a cada 2 segundos)
 #define TAMANHO_GRAFICO 10 // 20 segundos / 2 segundos por ponto = 10 pontos
 static float dadosGraficoChuva[TAMANHO_GRAFICO];
-static float dadosGraficoNivel[TAMANHO_GRAFICO]; // Novo buffer para nível de água
+static float dadosGraficoNivel[TAMANHO_GRAFICO]; // Buffer para nível de água
 static int indiceGrafico = 0;      // Índice atual nos buffers dos gráficos
 static int contagemGrafico = 0;    // Quantidade de dados nos buffers dos gráficos
 static uint32_t ultimoTempoGrafico = 0; // Último tempo de atualização dos gráficos
@@ -120,7 +121,7 @@ void TaskMedicao(void *pvParameters) {
         uint32_t tempoAtual = to_ms_since_boot(get_absolute_time());
         if ((tempoAtual - ultimoTempoGrafico) >= 2000) {
             dadosGraficoChuva[indiceGrafico] = dados.volumeChuvaPercent;
-            dadosGraficoNivel[indiceGrafico] = dados.nivelAguaPercent; // Novo: armazena nível
+            dadosGraficoNivel[indiceGrafico] = dados.nivelAguaPercent;
             indiceGrafico = (indiceGrafico + 1) % TAMANHO_GRAFICO;
             if (contagemGrafico < TAMANHO_GRAFICO) contagemGrafico++;
             ultimoTempoGrafico = tempoAtual;
@@ -338,6 +339,24 @@ void TaskDisplay(void *pvParameters) {
     }
 }
 
+// Task que controla a matriz de LEDs
+void TaskMatrizLED(void *pvParameters) {
+    dadosSensores_t dados;
+    // Cor vermelha em formato GRB (índice 10 da PALETA_CORES: R=190, G=0, B=0)
+    const uint32_t cor_vermelho = ((uint32_t)0 << 16) | ((uint32_t)190 << 8) | (uint32_t)0;
+
+    while (true) {
+        if (xQueueReceive(filaDadosSensores, &dados, pdMS_TO_TICKS(100)) == pdPASS) {
+            if (dados.nivelAguaPercent > 70.0f) {
+                matriz_draw_pattern(PAD_X, cor_vermelho); // Exibe "X" vermelho
+            } else {
+                matriz_clear(); // Limpa a matriz
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(250)); // Atraso para evitar sobrecarga
+    }
+}
+
 // FUNÇÃO PRINCIPAL
 int main() {
     stdio_init_all();
@@ -360,6 +379,10 @@ int main() {
     ssd1306_send_data(&display);
     printf("Display OLED inicializado.\n");
 
+    // Inicializa a matriz de LEDs
+    inicializar_matriz_led();
+    printf("Matriz de LEDs inicializada.\n");
+
     // Cria as filas
     filaDadosSensores = xQueueCreate(10, sizeof(dadosSensores_t));
     filaDadosExibicao = xQueueCreate(5, sizeof(dadosPrevisao_t));
@@ -373,6 +396,7 @@ int main() {
     xTaskCreate(TaskMedicao, "Leitura", 512, NULL, 2, NULL);
     xTaskCreate(TaskPrevisao, "Previsao", configMINIMAL_STACK_SIZE + 256, NULL, 1, NULL);
     xTaskCreate(TaskDisplay, "Exibicao", configMINIMAL_STACK_SIZE + 512, NULL, 1, NULL);
+    xTaskCreate(TaskMatrizLED, "MatrizLED", configMINIMAL_STACK_SIZE + 256, NULL, 1, NULL);
     printf("Tasks criadas.\n");
 
     // Inicia o sistema
