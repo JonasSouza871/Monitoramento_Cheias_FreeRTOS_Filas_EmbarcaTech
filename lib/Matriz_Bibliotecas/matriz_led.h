@@ -29,9 +29,9 @@ extern const CorRGB PALETA_CORES[];
 #define COR_BRANCO    GRB(255, 255, 255)  // Branco
 #define COR_PRATA     GRB(192, 192, 192)  // Prata
 #define COR_CINZA     GRB(40, 35, 35)     // Cinza
-#define COR_VIOLETA   GRB(130, 0, 130)     // Violeta
+#define COR_VIOLETA   GRB(130, 0, 130)    // Violeta
 #define COR_AZUL      GRB(0, 0, 200)      // Azul
-#define COR_MARROM    GRB(30, 10, 10)      // Marrom
+#define COR_MARROM    GRB(30, 10, 10)     // Marrom
 #define COR_VERDE     GRB(0, 150, 0)      // Verde
 #define COR_OURO      GRB(218, 165, 32)   // Ouro
 #define COR_LARANJA   GRB(255, 65, 0)     // Laranja
@@ -51,6 +51,7 @@ extern const bool padrao_numeros[10][25];  // Array 2D com padrões dos números
 void inicializar_matriz_led(void);  // Inicializa PIO para WS2812
 void matriz_draw_pattern(const uint8_t pad[5], uint32_t cor_on);  // Desenha padrão na matriz
 void matriz_draw_number(uint8_t numero, uint32_t cor_on);  // Desenha número (0-9) na matriz
+void matriz_draw_rain_animation(uint32_t cor_on);  // Desenha animação de chuva
 void matriz_clear(void);  // Limpa todos os LEDs
 
 #endif /* MATRIZ_LED_H */
