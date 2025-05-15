@@ -116,6 +116,7 @@ void TaskMedicao(void *pvParameters) {
 
         // Envia os dados para a fila
         xQueueSend(filaDadosSensores, &dados, pdMS_TO_TICKS(10));
+        printf("Medicao: Nivel=%.1f%%, Chuva=%.1f%%\n", dados.nivelAguaPercent, dados.volumeChuvaPercent);
 
         // Atualiza os buffers dos gráficos a cada 2 segundos
         uint32_t tempoAtual = to_ms_since_boot(get_absolute_time());
@@ -185,12 +186,14 @@ void TaskDisplay(void *pvParameters) {
                 telaAtual = (telaAtual + 1) % 4; // Alterna entre 0, 1, 2, 3
                 tempoUltimoPressionamento = tempoAtual;
                 ssd1306_fill(&display, false); // Limpa a tela ao trocar
+                printf("Botao pressionado: Tela=%d\n", telaAtual);
             }
         }
         estadoBotaoAnterior = estadoBotaoAtual;
 
-        // Recebe e exibe os dados dos sensores
-        if (xQueueReceive(filaDadosSensores, &dadosSensores, pdMS_TO_TICKS(50)) == pdPASS) {
+        // Espia os dados dos sensores sem consumir
+        if (xQueuePeek(filaDadosSensores, &dadosSensores, pdMS_TO_TICKS(50)) == pdPASS) {
+            printf("Display: Nivel=%.1f%%, Tela=%d\n", dadosSensores.nivelAguaPercent, telaAtual);
             ssd1306_fill(&display, false); // Limpa a tela
 
             if (telaAtual == 0) {
@@ -209,6 +212,26 @@ void TaskDisplay(void *pvParameters) {
 
                 const char* cor = dadosSensores.alertaRiscoEnchente ? "Cor: Vermelho" : "Cor: Verde";
                 ssd1306_draw_string(&display, cor, 0, 52, false);
+            } else if (telaAtual == 1) {
+                // Tela secundária: barras e previsão
+                ssd1306_draw_string(&display, "Barra Chuva:", 0, 0, false);
+                uint8_t barYChuva = 10, barWidth = SSD1306_WIDTH - 20, barHeight = 8;
+                ssd1306_rect(&display, barYChuva, 0, barWidth, barHeight, true, false);
+                uint8_t chuvaFill = (uint8_t)(dadosSensores.volumeChuvaPercent * (barWidth - 2) / 100.0f);
+                if (chuvaFill > 0) ssd1306_rect(&display, barYChuva + 1, 1, chuvaFill, barHeight - 2, true, true);
+
+                ssd1306_draw_string(&display, "Barra Nivel:", 0, 25, false);
+                uint8_t barYNivel = 35;
+                ssd1306_rect(&display, barYNivel, 0, barWidth, barHeight, true, false);
+                uint8_t nivelFill = (uint8_t)(dadosSensores.nivelAguaPercent * (barWidth - 2) / 100.0f);
+                if (nivelFill > 0) ssd1306_rect(&display, barYNivel + 1, 1, nivelFill, barHeight - 2, true, true);
+
+                if (xQueueReceive(filaDadosExibicao, &dadosPrevisao, 0) == pdPASS) {
+                    snprintf(buffer, sizeof(buffer), "Previsao:%.1f%%", dadosPrevisao.nivelAguaPrevisto);
+                } else {
+                    snprintf(buffer, sizeof(buffer), "Previsao: N/A");
+                }
+                ssd1306_draw_string(&display, buffer, 0, 50, false);
             } else if (telaAtual == 1) {
                 // Tela secundária: barras e previsão
                 ssd1306_draw_string(&display, "Barra Chuva:", 0, 0, false);
@@ -335,6 +358,8 @@ void TaskDisplay(void *pvParameters) {
                 }
             }
             ssd1306_send_data(&display); // Atualiza o display
+        } else {
+            printf("Display: Falha ao espiar filaDadosSensores\n");
         }
     }
 }
@@ -344,16 +369,25 @@ void TaskMatrizLED(void *pvParameters) {
     dadosSensores_t dados;
     // Cor vermelha em formato GRB (índice 10 da PALETA_CORES: R=190, G=0, B=0)
     const uint32_t cor_vermelho = ((uint32_t)0 << 16) | ((uint32_t)190 << 8) | (uint32_t)0;
+    bool estadoXAtivo = false; // Estado atual da matriz (X vermelho ativo ou não)
 
     while (true) {
-        if (xQueueReceive(filaDadosSensores, &dados, pdMS_TO_TICKS(100)) == pdPASS) {
-            if (dados.nivelAguaPercent > 70.0f) {
+        if (xQueuePeek(filaDadosSensores, &dados, pdMS_TO_TICKS(100)) == pdPASS) {
+            bool nivelAlto = (dados.nivelAguaPercent > 70.0f);
+            printf("MatrizLED: Nivel=%.1f%%, X=%d\n", dados.nivelAguaPercent, nivelAlto);
+
+            // Atualiza a matriz apenas se o estado mudar
+            if (nivelAlto && !estadoXAtivo) {
                 matriz_draw_pattern(PAD_X, cor_vermelho); // Exibe "X" vermelho
-            } else {
+                estadoXAtivo = true;
+            } else if (!nivelAlto && estadoXAtivo) {
                 matriz_clear(); // Limpa a matriz
+                estadoXAtivo = false;
             }
+        } else {
+            printf("MatrizLED: Falha ao espiar filaDadosSensores\n");
         }
-        vTaskDelay(pdMS_TO_TICKS(250)); // Atraso para evitar sobrecarga
+        vTaskDelay(pdMS_TO_TICKS(500)); // Atraso maior para reduzir uso de CPU
     }
 }
 
@@ -396,7 +430,7 @@ int main() {
     xTaskCreate(TaskMedicao, "Leitura", 512, NULL, 2, NULL);
     xTaskCreate(TaskPrevisao, "Previsao", configMINIMAL_STACK_SIZE + 256, NULL, 1, NULL);
     xTaskCreate(TaskDisplay, "Exibicao", configMINIMAL_STACK_SIZE + 512, NULL, 1, NULL);
-    xTaskCreate(TaskMatrizLED, "MatrizLED", configMINIMAL_STACK_SIZE + 256, NULL, 1, NULL);
+    xTaskCreate(TaskMatrizLED, "MatrizLED", configMINIMAL_STACK_SIZE + 512, NULL, 1, NULL);
     printf("Tasks criadas.\n");
 
     // Inicia o sistema
