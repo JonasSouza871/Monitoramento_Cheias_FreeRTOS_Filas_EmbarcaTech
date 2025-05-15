@@ -48,12 +48,13 @@ static float historicoVolumeChuva[TAMANHO_HISTORICO];
 static int indiceHistorico = 0;    // Índice atual no histórico
 static int contagemHistorico = 0;  // Quantidade de dados no histórico
 
-// Buffer para dados do gráfico (percentual de chuva a cada 2 segundos)
+// Buffers para dados dos gráficos (percentual de chuva e nível a cada 2 segundos)
 #define TAMANHO_GRAFICO 10 // 20 segundos / 2 segundos por ponto = 10 pontos
 static float dadosGraficoChuva[TAMANHO_GRAFICO];
-static int indiceGrafico = 0;      // Índice atual no buffer do gráfico
-static int contagemGrafico = 0;    // Quantidade de dados no buffer do gráfico
-static uint32_t ultimoTempoGrafico = 0; // Último tempo de atualização do gráfico
+static float dadosGraficoNivel[TAMANHO_GRAFICO]; // Novo buffer para nível de água
+static int indiceGrafico = 0;      // Índice atual nos buffers dos gráficos
+static int contagemGrafico = 0;    // Quantidade de dados nos buffers dos gráficos
+static uint32_t ultimoTempoGrafico = 0; // Último tempo de atualização dos gráficos
 
 // FUNÇÕES AUXILIARES
 
@@ -115,10 +116,11 @@ void TaskMedicao(void *pvParameters) {
         // Envia os dados para a fila
         xQueueSend(filaDadosSensores, &dados, pdMS_TO_TICKS(10));
 
-        // Atualiza o buffer do gráfico a cada 2 segundos
+        // Atualiza os buffers dos gráficos a cada 2 segundos
         uint32_t tempoAtual = to_ms_since_boot(get_absolute_time());
         if ((tempoAtual - ultimoTempoGrafico) >= 2000) {
             dadosGraficoChuva[indiceGrafico] = dados.volumeChuvaPercent;
+            dadosGraficoNivel[indiceGrafico] = dados.nivelAguaPercent; // Novo: armazena nível
             indiceGrafico = (indiceGrafico + 1) % TAMANHO_GRAFICO;
             if (contagemGrafico < TAMANHO_GRAFICO) contagemGrafico++;
             ultimoTempoGrafico = tempoAtual;
@@ -162,7 +164,7 @@ void TaskDisplay(void *pvParameters) {
     dadosSensores_t dadosSensores;
     dadosPrevisao_t dadosPrevisao;
     char buffer[32];
-    uint8_t telaAtual = 0; // 0: Principal, 1: Secundária, 2: Gráfico
+    uint8_t telaAtual = 0; // 0: Principal, 1: Secundária, 2: Gráfico de chuva, 3: Gráfico de nível
 
     // Configura o botão
     gpio_init(BUTTON_A_PIN);
@@ -179,7 +181,7 @@ void TaskDisplay(void *pvParameters) {
         uint32_t tempoAtual = to_ms_since_boot(get_absolute_time());
         if (estadoBotaoAnterior && !estadoBotaoAtual) {
             if ((tempoAtual - tempoUltimoPressionamento) > delayDebounceMs) {
-                telaAtual = (telaAtual + 1) % 3; // Alterna entre 0, 1, 2
+                telaAtual = (telaAtual + 1) % 4; // Alterna entre 0, 1, 2, 3
                 tempoUltimoPressionamento = tempoAtual;
                 ssd1306_fill(&display, false); // Limpa a tela ao trocar
             }
@@ -226,7 +228,7 @@ void TaskDisplay(void *pvParameters) {
                     snprintf(buffer, sizeof(buffer), "Previsao: N/A");
                 }
                 ssd1306_draw_string(&display, buffer, 0, 50, false);
-            } else {
+            } else if (telaAtual == 2) {
                 // Tela de gráfico: percentual de chuva vs. tempo
                 const uint8_t graficoX = 15; // Início do eixo X
                 const uint8_t graficoY = 54; // Base do eixo Y
@@ -254,6 +256,58 @@ void TaskDisplay(void *pvParameters) {
 
                     uint8_t yAtual = graficoY - (uint8_t)(chuvaAtual * alturaGrafico / 100.0f);
                     uint8_t yProximo = graficoY - (uint8_t)(chuvaProxima * alturaGrafico / 100.0f);
+
+                    uint8_t xAtual = graficoX + (i * larguraGrafico / (TAMANHO_GRAFICO - 1));
+                    uint8_t xProximo = graficoX + ((i + 1) * larguraGrafico / (TAMANHO_GRAFICO - 1));
+
+                    ssd1306_line(&display, xAtual, yAtual, xProximo, yProximo, true);
+                }
+
+                // Marcações no eixo Y (0, 20, 40, 60, 80, 100%)
+                for (int i = 0; i <= 5; i++) {
+                    uint8_t y = graficoY - (i * alturaGrafico / 5);
+                    ssd1306_line(&display, graficoX - 3, y, graficoX, y, true);
+                    if (i % 2 == 0) { // Rótulos em 0, 40, 80
+                        snprintf(buffer, sizeof(buffer), "%d", i * 20);
+                        ssd1306_draw_string(&display, buffer, 0, y - 3, true); // Números pequenos
+                    }
+                }
+
+                // Marcações no eixo X (0, 5, 10, 15, 20 segundos)
+                for (int i = 0; i <= 4; i++) {
+                    uint8_t x = graficoX + (i * larguraGrafico / 4);
+                    ssd1306_line(&display, x, graficoY, x, graficoY + 2, true);
+                    snprintf(buffer, sizeof(buffer), "%d", i * 5);
+                    ssd1306_draw_string(&display, buffer, x - 8, graficoY + 2, true); // Números pequenos
+                }
+            } else if (telaAtual == 3) {
+                // Tela de gráfico: percentual de nível de água vs. tempo
+                const uint8_t graficoX = 15; // Início do eixo X
+                const uint8_t graficoY = 54; // Base do eixo Y
+                const uint8_t alturaGrafico = 45; // Altura do gráfico
+                const uint8_t larguraGrafico = 100; // Largura do gráfico (20 segundos)
+
+                // Desenha o título centralizado
+                const char* titulo = "Nivel %";
+                uint8_t tituloWidth = strlen(titulo) * 5; // Aproximado com números pequenos
+                uint8_t tituloX = (SSD1306_WIDTH - tituloWidth) / 2; // Centraliza
+                ssd1306_draw_string(&display, titulo, tituloX, 5, true); // Título na linha y=5
+
+                // Desenha os eixos
+                ssd1306_line(&display, graficoX, graficoY, graficoX + larguraGrafico, graficoY, true);
+                ssd1306_line(&display, graficoX, graficoY, graficoX, graficoY - alturaGrafico, true);
+
+                // Plota os pontos do gráfico
+                int n = (contagemGrafico < TAMANHO_GRAFICO) ? contagemGrafico : TAMANHO_GRAFICO;
+                for (int i = 0; i < n - 1; i++) {
+                    int idxAtual = (indiceGrafico - n + i + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
+                    int idxProximo = (indiceGrafico - n + i + 1 + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
+
+                    float nivelAtual = dadosGraficoNivel[idxAtual];
+                    float nivelProximo = dadosGraficoNivel[idxProximo];
+
+                    uint8_t yAtual = graficoY - (uint8_t)(nivelAtual * alturaGrafico / 100.0f);
+                    uint8_t yProximo = graficoY - (uint8_t)(nivelProximo * alturaGrafico / 100.0f);
 
                     uint8_t xAtual = graficoX + (i * larguraGrafico / (TAMANHO_GRAFICO - 1));
                     uint8_t xProximo = graficoX + ((i + 1) * larguraGrafico / (TAMANHO_GRAFICO - 1));
