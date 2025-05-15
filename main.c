@@ -228,34 +228,20 @@ void TaskDisplay(void *pvParameters) {
                 ssd1306_draw_string(&display, buffer, 0, 50, false);
             } else {
                 // Tela de gráfico: percentual de chuva vs. tempo
-                const uint8_t graficoX = 10; // Início do eixo X
-                const uint8_t graficoY = 60; // Base do eixo Y
-                const uint8_t alturaGrafico = 50; // Altura do gráfico (0 a 100%)
+                const uint8_t graficoX = 15; // Início do eixo X
+                const uint8_t graficoY = 54; // Base do eixo Y
+                const uint8_t alturaGrafico = 45; // Altura do gráfico
                 const uint8_t larguraGrafico = 100; // Largura do gráfico (20 segundos)
+
+                // Desenha o título centralizado
+                const char* titulo = "Chuva %";
+                uint8_t tituloWidth = strlen(titulo) * 5; // Aproximado com números pequenos
+                uint8_t tituloX = (SSD1306_WIDTH - tituloWidth) / 2; // Centraliza
+                ssd1306_draw_string(&display, titulo, tituloX, 5, true); // Título na linha y=5
 
                 // Desenha os eixos
                 ssd1306_line(&display, graficoX, graficoY, graficoX + larguraGrafico, graficoY, true);
                 ssd1306_line(&display, graficoX, graficoY, graficoX, graficoY - alturaGrafico, true);
-
-                // Marcações no eixo Y (0, 20, 40, 60, 80, 100%)
-                for (int i = 0; i <= 5; i++) {
-                    uint8_t y = graficoY - (i * alturaGrafico / 5);
-                    ssd1306_line(&display, graficoX - 2, y, graficoX, y, true);
-                    if (i % 2 == 0) {
-                        snprintf(buffer, sizeof(buffer), "%d", i * 20);
-                        ssd1306_draw_string(&display, buffer, 0, y - 4, false);
-                    }
-                }
-
-                // Marcações no eixo X (0, 2, 4, ..., 20 segundos)
-                for (int i = 0; i <= 10; i++) {
-                    uint8_t x = graficoX + (i * larguraGrafico / 10);
-                    ssd1306_line(&display, x, graficoY, x, graficoY + 2, true);
-                    if (i % 2 == 0) {
-                        snprintf(buffer, sizeof(buffer), "%d", i * 2);
-                        ssd1306_draw_string(&display, buffer, x - 4, graficoY + 4, false);
-                    }
-                }
 
                 // Plota os pontos do gráfico
                 int n = (contagemGrafico < TAMANHO_GRAFICO) ? contagemGrafico : TAMANHO_GRAFICO;
@@ -273,6 +259,24 @@ void TaskDisplay(void *pvParameters) {
                     uint8_t xProximo = graficoX + ((i + 1) * larguraGrafico / (TAMANHO_GRAFICO - 1));
 
                     ssd1306_line(&display, xAtual, yAtual, xProximo, yProximo, true);
+                }
+
+                // Marcações no eixo Y (0, 20, 40, 60, 80, 100%)
+                for (int i = 0; i <= 5; i++) {
+                    uint8_t y = graficoY - (i * alturaGrafico / 5);
+                    ssd1306_line(&display, graficoX - 3, y, graficoX, y, true);
+                    if (i % 2 == 0) { // Rótulos em 0, 40, 80
+                        snprintf(buffer, sizeof(buffer), "%d", i * 20);
+                        ssd1306_draw_string(&display, buffer, 0, y - 3, true); // Números pequenos
+                    }
+                }
+
+                // Marcações no eixo X (0, 5, 10, 15, 20 segundos)
+                for (int i = 0; i <= 4; i++) {
+                    uint8_t x = graficoX + (i * larguraGrafico / 4);
+                    ssd1306_line(&display, x, graficoY, x, graficoY + 2, true);
+                    snprintf(buffer, sizeof(buffer), "%d", i * 5);
+                    ssd1306_draw_string(&display, buffer, x - 8, graficoY + 2, true); // Números pequenos
                 }
             }
             ssd1306_send_data(&display); // Atualiza o display

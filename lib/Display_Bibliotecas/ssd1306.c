@@ -93,15 +93,17 @@ void ssd1306_fill(ssd1306_t *ssd, bool value) {
 }
 
 // Desenha números pequenos (5x5 pixels)
+// Desenha números pequenos (5x5 pixels)
 void ssd1306_draw_small_number(ssd1306_t *ssd, char c, uint8_t x, uint8_t y) {
-    if (c >= '0' && c <= '9') {
-        uint16_t index = (c - '0') * 5; // Ajuste conforme estrutura do font.h
-        for (uint8_t i = 0; i < 5; ++i) {
-            uint8_t line = font[index + i];
-            for (uint8_t j = 0; j < 5; ++j) {
-                if ((line >> (4 - j)) & 0x01) {
-                    ssd1306_pixel(ssd, x + j, y + i, true);
-                }
+    if (c < '0' || c > '9') return; // Verifica se é um número válido
+    uint16_t index = 568 + (c - '0') * 5; // Início dos números pequenos em font[568]
+    for (uint8_t i = 0; i < 5; ++i) {
+        uint8_t line = font [
+
+index + i];
+        for (uint8_t j = 0; j < 5; ++j) {
+            if ((line >> (4 - j)) & 0x01) {
+                ssd1306_pixel(ssd, x + j, y + i, true);
             }
         }
     }
