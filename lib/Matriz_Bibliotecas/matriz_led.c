@@ -141,13 +141,13 @@ void matriz_draw_number(uint8_t numero, uint32_t cor_on) {  // Desenha um númer
     }
 }
 
-void matriz_draw_rain_animation(uint32_t cor_on) {  // Desenha animação de chuva
+void matriz_draw_rain_animation(uint32_t cor_on) {
     static uint8_t gotas[5] = {0};  // Posição Y de cada gota por coluna (0 a 4, 0=desligada)
     static uint32_t ultimo_tempo = 0;
     uint32_t tempo_atual = to_ms_since_boot(get_absolute_time());
 
-    // Atualiza a cada 100ms
-    if (tempo_atual - ultimo_tempo >= 100) {
+    // Atualiza a cada 50ms para movimento mais rápido
+    if (tempo_atual - ultimo_tempo >= 50) {
         // Limpa a matriz
         matriz_clear();
 
@@ -156,7 +156,8 @@ void matriz_draw_rain_animation(uint32_t cor_on) {  // Desenha animação de chu
             if (gotas[col] > 0) {
                 gotas[col]++;  // Move gota para baixo
                 if (gotas[col] > 4) gotas[col] = 0;  // Reseta se atingir o fundo
-            } else if (rand() % 100 < 30) {  // 30% de chance de nova gota
+            } else {
+                // Sempre criar uma nova gota quando a coluna estiver vazia
                 gotas[col] = 1;  // Começa na linha superior
             }
         }
@@ -164,13 +165,13 @@ void matriz_draw_rain_animation(uint32_t cor_on) {  // Desenha animação de chu
         // Desenha gotas
         for (int col = 0; col < 5; col++) {
             if (gotas[col] > 0) {
-                // Calcula índice do LED (matriz invertida: linha 4-gotas[col])
+                // Calcula índice do LED (matriz invertida: linha 4 - (gotas[col] - 1))
                 int lin = 4 - (gotas[col] - 1);
                 for (int i = 0; i < NUM_PIXELS; i++) {
                     if (i == lin * 5 + col) {
-                        ws2812_put(cor_on);
+                        ws2812_put(cor_on);  // Acende o LED da gota
                     } else {
-                        ws2812_put(COR_OFF);
+                        ws2812_put(COR_OFF);  // Desliga os outros LEDs
                     }
                 }
             }

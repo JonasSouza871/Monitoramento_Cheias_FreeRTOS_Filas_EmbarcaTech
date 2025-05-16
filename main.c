@@ -19,6 +19,7 @@
 #define BUTTON_A_PIN 5
 #define ADC_JOYSTICK_X_PIN 27 // GPIO 27 → ADC1 (nível de água)
 #define ADC_JOYSTICK_Y_PIN 26 // GPIO 26 → ADC0 (volume de chuva)
+#define LED_RED_PIN 13        // GPIO 13 → LED vermelho
 
 // Estrutura para armazenar dados dos sensores
 typedef struct {
@@ -224,7 +225,7 @@ void TaskDisplay(void *pvParameters) {
                 uint8_t barYNivel = 35;
                 ssd1306_rect(&display, barYNivel, 0, barWidth, barHeight, true, false);
                 uint8_t nivelFill = (uint8_t)(dadosSensores.nivelAguaPercent * (barWidth - 2) / 100.0f);
-                if (nivelFill > 0) ssd1306_rect(&display, barYNivel + 1, 1, nivelFill, barHeight - 2, true, true);
+                if (ashboard_fill > 0) ssd1306_rect(&display, barYNivel + 1, 1, nivelFill, barHeight - 2, true, true);
 
                 if (xQueueReceive(filaDadosExibicao, &dadosPrevisao, 0) == pdPASS) {
                     snprintf(buffer, sizeof(buffer), "Previsao:%.1f%%", dadosPrevisao.nivelAguaPrevisto);
@@ -344,56 +345,82 @@ void TaskDisplay(void *pvParameters) {
     }
 }
 
-// Task que controla a matriz de LEDs
+// Task que controla a matriz de LEDs e o LED vermelho
 void TaskMatrizLED(void *pvParameters) {
     dadosSensores_t dados;
     // Cores em formato GRB
     const uint32_t cor_vermelho = COR_VERMELHO; // R=190, G=0, B=0
     const uint32_t cor_azul = COR_AZUL;         // R=0, G=0, B=200
+    const uint32_t cor_amarelo = COR_AMARELO;   // R=255, G=140, B=0
     bool estadoXAtivo = false;                  // Estado do "X" vermelho
     bool estadoChuvaAtivo = false;              // Estado da animação de chuva
-    bool exibirAnimaChuva = false;              // Alterna entre chuva e "X"
+    bool estadoExclamacaoAtivo = false;         // Estado do "!" amarelo
+    bool estadoLedVermelho = false;             // Estado do LED vermelho
+    uint8_t estadoExibicao = 0;                 // 0: Chuva, 1: Exclamação, 2: X
     uint32_t ultimoTempoAlternancia = 0;        // Última alternância (ms)
 
     while (true) {
         if (xQueuePeek(filaDadosSensores, &dados, pdMS_TO_TICKS(100)) == pdPASS) {
             bool chuvaAlta = (dados.volumeChuvaPercent > 80.0f);
             bool nivelAlto = (dados.nivelAguaPercent > 70.0f);
+            bool nivelCritico = (dados.nivelAguaPercent > 80.0f); // Condição para LED vermelho
             uint32_t tempoAtual = to_ms_since_boot(get_absolute_time());
 
-            printf("MatrizLED: Nivel=%.1f%%, Chuva=%.1f%%, ChuvaAlta=%d, NivelAlto=%d\n",
-                   dados.nivelAguaPercent, dados.volumeChuvaPercent, chuvaAlta, nivelAlto);
+            printf("MatrizLED: Nivel=%.1f%%, Chuva=%.1f%%, ChuvaAlta=%d, NivelAlto=%d, LedVermelho=%d\n",
+                   dados.nivelAguaPercent, dados.volumeChuvaPercent, chuvaAlta, nivelAlto, nivelCritico);
+
+            // Controle do LED vermelho
+            if (nivelCritico && !estadoLedVermelho) {
+                gpio_put(LED_RED_PIN, 1); // Liga o LED
+                estadoLedVermelho = true;
+                printf("LED Vermelho: LIGADO\n");
+            } else if (!nivelCritico && estadoLedVermelho) {
+                gpio_put(LED_RED_PIN, 0); // Desliga o LED
+                estadoLedVermelho = false;
+                printf("LED Vermelho: DESLIGADO\n");
+            }
 
             // Lógica de alternância a cada 4 segundos para chuva > 80%
             if (chuvaAlta && (tempoAtual - ultimoTempoAlternancia >= 4000)) {
-                exibirAnimaChuva = !exibirAnimaChuva; // Alterna entre chuva e "X"
+                estadoExibicao = (estadoExibicao + 1) % 3; // Alterna entre 0 (chuva), 1 (exclamação), 2 (X)
                 ultimoTempoAlternancia = tempoAtual;
-                printf("MatrizLED: Alternando para %s\n", exibirAnimaChuva ? "Animação Chuva" : "X Vermelho");
+                printf("MatrizLED: Alternando para %s\n",
+                       estadoExibicao == 0 ? "Animação Chuva" :
+                       estadoExibicao == 1 ? "Exclamação Amarela" : "X Vermelho");
             }
 
-            // Estado 1: Chuva > 80% → Alternar animação de chuva e "X" vermelho
+            // Estado 1: Chuva > 80% → Alternar animação de chuva, "!" amarelo e "X" vermelho
             if (chuvaAlta) {
-                if (exibirAnimaChuva) {
+                if (estadoExibicao == 0) {
                     matriz_draw_rain_animation(cor_azul);
                     estadoChuvaAtivo = true;
+                    estadoExclamacaoAtivo = false;
+                    estadoXAtivo = false;
+                } else if (estadoExibicao == 1) {
+                    matriz_draw_pattern(PAD_EXC, cor_amarelo);
+                    estadoExclamacaoAtivo = true;
+                    estadoChuvaAtivo = false;
                     estadoXAtivo = false;
                 } else {
                     matriz_draw_pattern(PAD_X, cor_vermelho);
                     estadoXAtivo = true;
                     estadoChuvaAtivo = false;
+                    estadoExclamacaoAtivo = false;
                 }
             }
-            // Estado 2: Nível > 70% e Chuva <= 80% → Apenas "X" vermelho
+            // Estado 2: Nível > 70% → Apenas "X" vermelho
             else if (nivelAlto && !estadoXAtivo) {
                 matriz_draw_pattern(PAD_X, cor_vermelho);
                 estadoXAtivo = true;
                 estadoChuvaAtivo = false;
+                estadoExclamacaoAtivo = false;
             }
             // Estado 3: Nenhuma condição → Limpar matriz
-            else if (!nivelAlto && (estadoXAtivo || estadoChuvaAtivo)) {
+            else if (!nivelAlto && (estadoXAtivo || estadoChuvaAtivo || estadoExclamacaoAtivo)) {
                 matriz_clear();
                 estadoXAtivo = false;
                 estadoChuvaAtivo = false;
+                estadoExclamacaoAtivo = false;
             }
         } else {
             printf("MatrizLED: Falha ao espiar filaDadosSensores\n");
@@ -407,6 +434,12 @@ int main() {
     stdio_init_all();
     sleep_ms(2000); // Aguarda o terminal serial
     printf("\n=== Sistema de Alerta de Enchente - Inicializando ===\n\n");
+
+    // Inicializa o GPIO do LED vermelho
+    gpio_init(LED_RED_PIN);
+    gpio_set_dir(LED_RED_PIN, GPIO_OUT);
+    gpio_put(LED_RED_PIN, 0); // Garante que o LED comece desligado
+    printf("LED vermelho inicializado em GPIO=%d.\n", LED_RED_PIN);
 
     // Configura o I2C
     i2c_init(I2C_PORT, 100 * 1000);
