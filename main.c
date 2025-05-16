@@ -19,6 +19,7 @@
 #define BUTTON_A_PIN 5
 #define ADC_JOYSTICK_X_PIN 27 // GPIO 27 → ADC1 (nível de água)
 #define ADC_JOYSTICK_Y_PIN 26 // GPIO 26 → ADC0 (volume de chuva)
+#define LED_PIN 13 // Pino do LED vermelho
 
 // Estrutura para armazenar dados dos sensores
 typedef struct {
@@ -99,6 +100,10 @@ void TaskMedicao(void *pvParameters) {
     adc_gpio_init(ADC_JOYSTICK_X_PIN);
     adc_gpio_init(ADC_JOYSTICK_Y_PIN);
 
+    // Configura o pino do LED como saída
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+
     dadosSensores_t dados;
 
     while (true) {
@@ -126,6 +131,13 @@ void TaskMedicao(void *pvParameters) {
             indiceGrafico = (indiceGrafico + 1) % TAMANHO_GRAFICO;
             if (contagemGrafico < TAMANHO_GRAFICO) contagemGrafico++;
             ultimoTempoGrafico = tempoAtual;
+        }
+
+        // Controla o LED com base no nível de água
+        if (dados.nivelAguaPercent > 70.0f) {
+            gpio_put(LED_PIN, 1); // Acende o LED
+        } else {
+            gpio_put(LED_PIN, 0); // Apaga o LED
         }
 
         vTaskDelay(pdMS_TO_TICKS(250));
