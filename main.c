@@ -1,4 +1,6 @@
 #include <string.h>
+#include <math.h>   // Include for fabs
+#include <stdio.h>  // Include for snprintf
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
 #include "hardware/i2c.h"
