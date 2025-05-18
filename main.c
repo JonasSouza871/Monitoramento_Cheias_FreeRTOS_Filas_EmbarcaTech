@@ -1,4 +1,3 @@
-#include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
@@ -119,9 +118,10 @@ void TaskMedicao(void *pvParameters) {
         dados.volumeChuvaMmH = percentualParaMmH(dados.volumeChuvaPercent);
         dados.alertaRiscoEnchente = (dados.nivelAguaPercent >= 70.0f || dados.volumeChuvaPercent >= 80.0f);
 
-        // Envia os dados para a fila
-        xQueueSend(filaDadosSensores, &dados, pdMS_TO_TICKS(10));
-        printf("Medicao: Nivel=%.1f%%, Chuva=%.1f%%\n", dados.nivelAguaPercent, dados.volumeChuvaPercent);
+        // Envia os dados para a fila com retry
+        while (xQueueSend(filaDadosSensores, &dados, pdMS_TO_TICKS(100)) != pdPASS) {
+            vTaskDelay(pdMS_TO_TICKS(10)); // Aguarda antes de tentar novamente
+        }
 
         // Atualiza os buffers dos gráficos a cada 2 segundos
         uint32_t tempoAtual = to_ms_since_boot(get_absolute_time());
@@ -134,11 +134,7 @@ void TaskMedicao(void *pvParameters) {
         }
 
         // Controla o LED com base no nível de água
-        if (dados.nivelAguaPercent > 70.0f) {
-            gpio_put(LED_PIN, 1); // Acende o LED
-        } else {
-            gpio_put(LED_PIN, 0); // Apaga o LED
-        }
+        gpio_put(LED_PIN, dados.nivelAguaPercent > 70.0f ? 1 : 0);
 
         vTaskDelay(pdMS_TO_TICKS(250));
     }
@@ -150,7 +146,7 @@ void TaskPrevisao(void *pvParameters) {
     dadosPrevisao_t dadosEnviar;
 
     while (true) {
-        if (xQueueReceive(filaDadosSensores, &dadosRecebidos, pdMS_TO_TICKS(100)) == pdPASS) {
+        if (xQueuePeek(filaDadosSensores, &dadosRecebidos, pdMS_TO_TICKS(100)) == pdPASS) {
             // Atualiza o histórico
             historicoNivelAgua[indiceHistorico] = dadosRecebidos.nivelAguaPercent;
             historicoVolumeChuva[indiceHistorico] = dadosRecebidos.volumeChuvaMmH;
@@ -167,18 +163,22 @@ void TaskPrevisao(void *pvParameters) {
             else if (nivelPrevisto > 100.0f) nivelPrevisto = 100.0f;
             dadosEnviar.nivelAguaPrevisto = nivelPrevisto;
 
-            // Envia os dados de previsão
-            xQueueSend(filaDadosExibicao, &dadosEnviar, pdMS_TO_TICKS(10));
+            // Envia os dados de previsão com retry
+            while (xQueueSend(filaDadosExibicao, &dadosEnviar, pdMS_TO_TICKS(100)) != pdPASS) {
+                vTaskDelay(pdMS_TO_TICKS(10)); // Aguarda antes de tentar novamente
+            }
         }
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
 // Task que exibe os dados no display OLED
 void TaskDisplay(void *pvParameters) {
-    dadosSensores_t dadosSensores;
+    dadosSensores_t dadosSensores, ultimoDadoLido = {0};
     dadosPrevisao_t dadosPrevisao;
     char buffer[32];
     uint8_t telaAtual = 0; // 0: Principal, 1: Secundária, 2: Gráfico de chuva, 3: Gráfico de nível
+    bool precisaRedesenhar = true; // Força redesenho na primeira iteração
 
     // Configura o botão
     gpio_init(BUTTON_A_PIN);
@@ -193,166 +193,170 @@ void TaskDisplay(void *pvParameters) {
         // Verifica o botão com debounce
         bool estadoBotaoAtual = gpio_get(BUTTON_A_PIN);
         uint32_t tempoAtual = to_ms_since_boot(get_absolute_time());
-        if (estadoBotaoAnterior && !estadoBotaoAtual) {
-            if ((tempoAtual - tempoUltimoPressionamento) > delayDebounceMs) {
-                telaAtual = (telaAtual + 1) % 4; // Alterna entre 0, 1, 2, 3
-                tempoUltimoPressionamento = tempoAtual;
-                ssd1306_fill(&display, false); // Limpa a tela ao trocar
-                printf("Botao pressionado: Tela=%d\n", telaAtual);
-            }
+        if (estadoBotaoAnterior && !estadoBotaoAtual && (tempoAtual - tempoUltimoPressionamento) > delayDebounceMs) {
+            telaAtual = (telaAtual + 1) % 4; // Alterna entre 0, 1, 2, 3
+            tempoUltimoPressionamento = tempoAtual;
+            precisaRedesenhar = true; // Força redesenho ao trocar tela
         }
         estadoBotaoAnterior = estadoBotaoAtual;
 
-        // Espia os dados dos sensores sem consumir
+        // Espia os dados dos sensores
         if (xQueuePeek(filaDadosSensores, &dadosSensores, pdMS_TO_TICKS(50)) == pdPASS) {
-            printf("Display: Nivel=%.1f%%, Tela=%d\n", dadosSensores.nivelAguaPercent, telaAtual);
-            ssd1306_fill(&display, false); // Limpa a tela
+            // Verifica se os dados mudaram significativamente
+            bool dadosMudaram = (fabs(dadosSensores.nivelAguaPercent - ultimoDadoLido.nivelAguaPercent) > 0.1f ||
+                                fabs(dadosSensores.volumeChuvaPercent - ultimoDadoLido.volumeChuvaPercent) > 0.1f ||
+                                dadosSensores.alertaRiscoEnchente != ultimoDadoLido.alertaRiscoEnchente);
+            ultimoDadoLido = dadosSensores;
 
-            if (telaAtual == 0) {
-                // Tela principal: dados detalhados
-                snprintf(buffer, sizeof(buffer), "QntChuva:%.2fmm", dadosSensores.volumeChuvaMmH);
-                ssd1306_draw_string(&display, buffer, 0, 0, false);
+            if (dadosMudaram || precisaRedesenhar) {
+                ssd1306_fill(&display, false); // Limpa a tela
 
-                snprintf(buffer, sizeof(buffer), "Chuva: %.1f%%", dadosSensores.volumeChuvaPercent);
-                ssd1306_draw_string(&display, buffer, 0, 13, false);
+                if (telaAtual == 0) {
+                    // Tela principal: dados detalhados
+                    snprintf(buffer, sizeof(buffer), "QntChuva:%.2fmm", dadosSensores.volumeChuvaMmH);
+                    ssd1306_draw_string(&display, buffer, 0, 0, false);
 
-                snprintf(buffer, sizeof(buffer), "Nivel: %.1f%%", dadosSensores.nivelAguaPercent);
-                ssd1306_draw_string(&display, buffer, 0, 26, false);
+                    snprintf(buffer, sizeof(buffer), "Chuva: %.1f%%", dadosSensores.volumeChuvaPercent);
+                    ssd1306_draw_string(&display, buffer, 0, 13, false);
 
-                snprintf(buffer, sizeof(buffer), "Status: %s", dadosSensores.alertaRiscoEnchente ? "ALERTA!" : "Normal");
-                ssd1306_draw_string(&display, buffer, 0, 39, false);
+                    snprintf(buffer, sizeof(buffer), "Nivel: %.1f%%", dadosSensores.nivelAguaPercent);
+                    ssd1306_draw_string(&display, buffer, 0, 26, false);
 
-                const char* cor = dadosSensores.alertaRiscoEnchente ? "Cor: Vermelho" : "Cor: Verde";
-                ssd1306_draw_string(&display, cor, 0, 52, false);
-            } else if (telaAtual == 1) {
-                // Tela secundária: barras e previsão
-                ssd1306_draw_string(&display, "Barra Chuva:", 0, 0, false);
-                uint8_t barYChuva = 10, barWidth = SSD1306_WIDTH - 20, barHeight = 8;
-                ssd1306_rect(&display, barYChuva, 0, barWidth, barHeight, true, false);
-                uint8_t chuvaFill = (uint8_t)(dadosSensores.volumeChuvaPercent * (barWidth - 2) / 100.0f);
-                if (chuvaFill > 0) ssd1306_rect(&display, barYChuva + 1, 1, chuvaFill, barHeight - 2, true, true);
+                    snprintf(buffer, sizeof(buffer), "Status: %s", dadosSensores.alertaRiscoEnchente ? "ALERTA!" : "Normal");
+                    ssd1306_draw_string(&display, buffer, 0, 39, false);
 
-                ssd1306_draw_string(&display, "Barra Nivel:", 0, 25, false);
-                uint8_t barYNivel = 35;
-                ssd1306_rect(&display, barYNivel, 0, barWidth, barHeight, true, false);
-                uint8_t nivelFill = (uint8_t)(dadosSensores.nivelAguaPercent * (barWidth - 2) / 100.0f);
-                if (nivelFill > 0) ssd1306_rect(&display, barYNivel + 1, 1, nivelFill, barHeight - 2, true, true);
+                    const char* cor = dadosSensores.alertaRiscoEnchente ? "Cor: Vermelho" : "Cor: Verde";
+                    ssd1306_draw_string(&display, cor, 0, 52, false);
+                } else if (telaAtual == 1) {
+                    // Tela secundária: barras e previsão
+                    ssd1306_draw_string(&display, "Barra Chuva:", 0, 0, false);
+                    uint8_t barYChuva = 10, barWidth = SSD1306_WIDTH - 20, barHeight = 8;
+                    ssd1306_rect(&display, barYChuva, 0, barWidth, barHeight, true, false);
+                    uint8_t chuvaFill = (uint8_t)(dadosSensores.volumeChuvaPercent * (barWidth - 2) / 100.0f);
+                    if (chuvaFill > 0) ssd1306_rect(&display, barYChuva + 1, 1, chuvaFill, barHeight - 2, true, true);
 
-                if (xQueueReceive(filaDadosExibicao, &dadosPrevisao, 0) == pdPASS) {
-                    snprintf(buffer, sizeof(buffer), "Previsao:%.1f%%", dadosPrevisao.nivelAguaPrevisto);
-                } else {
-                    snprintf(buffer, sizeof(buffer), "Previsao: N/A");
-                }
-                ssd1306_draw_string(&display, buffer, 0, 50, false);
-            } else if (telaAtual == 2) {
-                // Tela de gráfico: percentual de chuva vs. tempo
-                const uint8_t graficoX = 15; // Início do eixo X
-                const uint8_t graficoY = 54; // Base do eixo Y
-                const uint8_t alturaGrafico = 45; // Altura do gráfico
-                const uint8_t larguraGrafico = 100; // Largura do gráfico (20 segundos)
+                    ssd1306_draw_string(&display, "Barra Nivel:", 0, 25, false);
+                    uint8_t barYNivel = 35;
+                    ssd1306_rect(&display, barYNivel, 0, barWidth, barHeight, true, false);
+                    uint8_t nivelFill = (uint8_t)(dadosSensores.nivelAguaPercent * (barWidth - 2) / 100.0f);
+                    if (nivelFill > 0) ssd1306_rect(&display, barYNivel + 1, 1, nivelFill, barHeight - 2, true, true);
 
-                // Desenha o título centralizado
-                const char* titulo = "Chuva %";
-                uint8_t tituloWidth = strlen(titulo) * 5; // Aproximado com números pequenos
-                uint8_t tituloX = (SSD1306_WIDTH - tituloWidth) / 2; // Centraliza
-                ssd1306_draw_string(&display, titulo, tituloX, 5, true); // Título na linha y=5
+                    if (xQueuePeek(filaDadosExibicao, &dadosPrevisao, pdMS_TO_TICKS(50)) == pdPASS) {
+                        snprintf(buffer, sizeof(buffer), "Previsao:%.1f%%", dadosPrevisao.nivelAguaPrevisto);
+                    } else {
+                        snprintf(buffer, sizeof(buffer), "Previsao: N/A");
+                    }
+                    ssd1306_draw_string(&display, buffer, 0, 50, false);
+                } else if (telaAtual == 2) {
+                    // Tela de gráfico: percentual de chuva vs. tempo
+                    const uint8_t graficoX = 15; // Início do eixo X
+                    const uint8_t graficoY = 54; // Base do eixo Y
+                    const uint8_t alturaGrafico = 45; // Altura do gráfico
+                    const uint8_t larguraGrafico = 100; // Largura do gráfico (20 segundos)
 
-                // Desenha os eixos
-                ssd1306_line(&display, graficoX, graficoY, graficoX + larguraGrafico, graficoY, true);
-                ssd1306_line(&display, graficoX, graficoY, graficoX, graficoY - alturaGrafico, true);
+                    // Desenha o título centralizado
+                    const char* titulo = "Chuva %";
+                    uint8_t tituloWidth = strlen(titulo) * 5; // Aproximado com números pequenos
+                    uint8_t tituloX = (SSD1306_WIDTH - tituloWidth) / 2; // Centraliza
+                    ssd1306_draw_string(&display, titulo, tituloX, 5, true); // Título na linha y=5
 
-                // Plota os pontos do gráfico
-                int n = (contagemGrafico < TAMANHO_GRAFICO) ? contagemGrafico : TAMANHO_GRAFICO;
-                for (int i = 0; i < n - 1; i++) {
-                    int idxAtual = (indiceGrafico - n + i + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
-                    int idxProximo = (indiceGrafico - n + i + 1 + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
+                    // Desenha os eixos
+                    ssd1306_line(&display, graficoX, graficoY, graficoX + larguraGrafico, graficoY, true);
+                    ssd1306_line(&display, graficoX, graficoY, graficoX, graficoY - alturaGrafico, true);
 
-                    float chuvaAtual = dadosGraficoChuva[idxAtual];
-                    float chuvaProxima = dadosGraficoChuva[idxProximo];
+                    // Plota os pontos do gráfico
+                    int n = (contagemGrafico < TAMANHO_GRAFICO) ? contagemGrafico : TAMANHO_GRAFICO;
+                    for (int i = 0; i < n - 1; i++) {
+                        int idxAtual = (indiceGrafico - n + i + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
+                        int idxProximo = (indiceGrafico - n + i + 1 + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
 
-                    uint8_t yAtual = graficoY - (uint8_t)(chuvaAtual * alturaGrafico / 100.0f);
-                    uint8_t yProximo = graficoY - (uint8_t)(chuvaProxima * alturaGrafico / 100.0f);
+                        float chuvaAtual = dadosGraficoChuva[idxAtual];
+                        float chuvaProxima = dadosGraficoChuva[idxProximo];
 
-                    uint8_t xAtual = graficoX + (i * larguraGrafico / (TAMANHO_GRAFICO - 1));
-                    uint8_t xProximo = graficoX + ((i + 1) * larguraGrafico / (TAMANHO_GRAFICO - 1));
+                        uint8_t yAtual = graficoY - (uint8_t)(chuvaAtual * alturaGrafico / 100.0f);
+                        uint8_t yProximo = graficoY - (uint8_t)(chuvaProxima * alturaGrafico / 100.0f);
 
-                    ssd1306_line(&display, xAtual, yAtual, xProximo, yProximo, true);
-                }
+                        uint8_t xAtual = graficoX + (i * larguraGrafico / (TAMANHO_GRAFICO - 1));
+                        uint8_t xProximo = graficoX + ((i + 1) * larguraGrafico / (TAMANHO_GRAFICO - 1));
 
-                // Marcações no eixo Y (0, 20, 40, 60, 80, 100%)
-                for (int i = 0; i <= 5; i++) {
-                    uint8_t y = graficoY - (i * alturaGrafico / 5);
-                    ssd1306_line(&display, graficoX - 3, y, graficoX, y, true);
-                    if (i % 2 == 0) { // Rótulos em 0, 40, 80
-                        snprintf(buffer, sizeof(buffer), "%d", i * 20);
-                        ssd1306_draw_string(&display, buffer, 0, y - 3, true); // Números pequenos
+                        ssd1306_line(&display, xAtual, yAtual, xProximo, yProximo, true);
+                    }
+
+                    // Marcações no eixo Y (0, 20, 40, 60, 80, 100%)
+                    for (int i = 0; i <= 5; i++) {
+                        uint8_t y = graficoY - (i * alturaGrafico / 5);
+                        ssd1306_line(&display, graficoX - 3, y, graficoX, y, true);
+                        if (i % 2 == 0) { // Rótulos em 0, 40, 80
+                            snprintf(buffer, sizeof(buffer), "%d", i * 20);
+                            ssd1306_draw_string(&display, buffer, 0, y - 3, true); // Números pequenos
+                        }
+                    }
+
+                    // Marcações no eixo X (0, 5, 10, 15, 20 segundos)
+                    for (int i = 0; i <= 4; i++) {
+                        uint8_t x = graficoX + (i * larguraGrafico / 4);
+                        ssd1306_line(&display, x, graficoY, x, graficoY + 2, true);
+                        snprintf(buffer, sizeof(buffer), "%d", i * 5);
+                        ssd1306_draw_string(&display, buffer, x - 8, graficoY + 2, true); // Números pequenos
+                    }
+                } else if (telaAtual == 3) {
+                    // Tela de gráfico: percentual de nível de água vs. tempo
+                    const uint8_t graficoX = 15; // Início do eixo X
+                    const uint8_t graficoY = 54; // Base do eixo Y
+                    const uint8_t alturaGrafico = 45; // Altura do gráfico
+                    const uint8_t larguraGrafico = 100; // Largura do gráfico (20 segundos)
+
+                    // Desenha o título centralizado
+                    const char* titulo = "Nivel %";
+                    uint8_t tituloWidth = strlen(titulo) * 5; // Aproximado com números pequenos
+                    uint8_t tituloX = (SSD1306_WIDTH - tituloWidth) / 2; // Centraliza
+                    ssd1306_draw_string(&display, titulo, tituloX, 5, true); // Título na linha y=5
+
+                    // Desenha os eixos
+                    ssd1306_line(&display, graficoX, graficoY, graficoX + larguraGrafico, graficoY, true);
+                    ssd1306_line(&display, graficoX, graficoY, graficoX, graficoY - alturaGrafico, true);
+
+                    // Plota os pontos do gráfico
+                    int n = (contagemGrafico < TAMANHO_GRAFICO) ? contagemGrafico : TAMANHO_GRAFICO;
+                    for (int i = 0; i < n - 1; i++) {
+                        int idxAtual = (indiceGrafico - n + i + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
+                        int idxProximo = (indiceGrafico - n + i + 1 + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
+
+                        float nivelAtual = dadosGraficoNivel[idxAtual];
+                        float nivelProximo = dadosGraficoNivel[idxProximo];
+
+                        uint8_t yAtual = graficoY - (uint8_t)(nivelAtual * alturaGrafico / 100.0f);
+                        uint8_t yProximo = graficoY - (uint8_t)(nivelProximo * alturaGrafico / 100.0f);
+
+                        uint8_t xAtual = graficoX + (i * larguraGrafico / (TAMANHO_GRAFICO - 1));
+                        uint8_t xProximo = graficoX + ((i + 1) * larguraGrafico / (TAMANHO_GRAFICO - 1));
+
+                        ssd1306_line(&display, xAtual, yAtual, xProximo, yProximo, true);
+                    }
+
+                    // Marcações no eixo Y (0, 20, 40, 60, 80, 100%)
+                    for (int i = 0; i <= 5; i++) {
+                        uint8_t y = graficoY - (i * alturaGrafico / 5);
+                        ssd1306_line(&display, graficoX - 3, y, graficoX, y, true);
+                        if (i % 2 == 0) { // Rótulos em 0, 40, 80
+                            snprintf(buffer, sizeof(buffer), "%d", i * 20);
+                            ssd1306_draw_string(&display, buffer, 0, y - 3, true); // Números pequenos
+                        }
+                    }
+
+                    // Marcações no eixo X (0, 5, 10, 15, 20 segundos)
+                    for (int i = 0; i <= 4; i++) {
+                        uint8_t x = graficoX + (i * larguraGrafico / 4);
+                        ssd1306_line(&display, x, graficoY, x, graficoY + 2, true);
+                        snprintf(buffer, sizeof(buffer), "%d", i * 5);
+                        ssd1306_draw_string(&display, buffer, x - 8, graficoY + 2, true); // Números pequenos
                     }
                 }
-
-                // Marcações no eixo X (0, 5, 10, 15, 20 segundos)
-                for (int i = 0; i <= 4; i++) {
-                    uint8_t x = graficoX + (i * larguraGrafico / 4);
-                    ssd1306_line(&display, x, graficoY, x, graficoY + 2, true);
-                    snprintf(buffer, sizeof(buffer), "%d", i * 5);
-                    ssd1306_draw_string(&display, buffer, x - 8, graficoY + 2, true); // Números pequenos
-                }
-            } else if (telaAtual == 3) {
-                // Tela de gráfico: percentual de nível de água vs. tempo
-                const uint8_t graficoX = 15; // Início do eixo X
-                const uint8_t graficoY = 54; // Base do eixo Y
-                const uint8_t alturaGrafico = 45; // Altura do gráfico
-                const uint8_t larguraGrafico = 100; // Largura do gráfico (20 segundos)
-
-                // Desenha o título centralizado
-                const char* titulo = "Nivel %";
-                uint8_t tituloWidth = strlen(titulo) * 5; // Aproximado com números pequenos
-                uint8_t tituloX = (SSD1306_WIDTH - tituloWidth) / 2; // Centraliza
-                ssd1306_draw_string(&display, titulo, tituloX, 5, true); // Título na linha y=5
-
-                // Desenha os eixos
-                ssd1306_line(&display, graficoX, graficoY, graficoX + larguraGrafico, graficoY, true);
-                ssd1306_line(&display, graficoX, graficoY, graficoX, graficoY - alturaGrafico, true);
-
-                // Plota os pontos do gráfico
-                int n = (contagemGrafico < TAMANHO_GRAFICO) ? contagemGrafico : TAMANHO_GRAFICO;
-                for (int i = 0; i < n - 1; i++) {
-                    int idxAtual = (indiceGrafico - n + i + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
-                    int idxProximo = (indiceGrafico - n + i + 1 + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
-
-                    float nivelAtual = dadosGraficoNivel[idxAtual];
-                    float nivelProximo = dadosGraficoNivel[idxProximo];
-
-                    uint8_t yAtual = graficoY - (uint8_t)(nivelAtual * alturaGrafico / 100.0f);
-                    uint8_t yProximo = graficoY - (uint8_t)(nivelProximo * alturaGrafico / 100.0f);
-
-                    uint8_t xAtual = graficoX + (i * larguraGrafico / (TAMANHO_GRAFICO - 1));
-                    uint8_t xProximo = graficoX + ((i + 1) * larguraGrafico / (TAMANHO_GRAFICO - 1));
-
-                    ssd1306_line(&display, xAtual, yAtual, xProximo, yProximo, true);
-                }
-
-                // Marcações no eixo Y (0, 20, 40, 60, 80, 100%)
-                for (int i = 0; i <= 5; i++) {
-                    uint8_t y = graficoY - (i * alturaGrafico / 5);
-                    ssd1306_line(&display, graficoX - 3, y, graficoX, y, true);
-                    if (i % 2 == 0) { // Rótulos em 0, 40, 80
-                        snprintf(buffer, sizeof(buffer), "%d", i * 20);
-                        ssd1306_draw_string(&display, buffer, 0, y - 3, true); // Números pequenos
-                    }
-                }
-
-                // Marcações no eixo X (0, 5, 10, 15, 20 segundos)
-                for (int i = 0; i <= 4; i++) {
-                    uint8_t x = graficoX + (i * larguraGrafico / 4);
-                    ssd1306_line(&display, x, graficoY, x, graficoY + 2, true);
-                    snprintf(buffer, sizeof(buffer), "%d", i * 5);
-                    ssd1306_draw_string(&display, buffer, x - 8, graficoY + 2, true); // Números pequenos
-                }
+                ssd1306_send_data(&display); // Atualiza o display
+                precisaRedesenhar = false; // Evita redesenho até novos dados ou troca de tela
             }
-            ssd1306_send_data(&display); // Atualiza o display
-        } else {
-            printf("Display: Falha ao espiar filaDadosSensores\n");
         }
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -375,16 +379,11 @@ void TaskMatrizLED(void *pvParameters) {
             bool nivelAlto = (dados.nivelAguaPercent > 70.0f);
             uint32_t tempoAtual = to_ms_since_boot(get_absolute_time());
 
-            printf("MatrizLED: Nivel=%.1f%%, Chuva=%.1f%%, ChuvaAlta=%d, NivelAlto=%d\n",
-                   dados.nivelAguaPercent, dados.volumeChuvaPercent, chuvaAlta, nivelAlto);
-
             // Lógica de alternância a cada 4 segundos para chuva > 80%
             if (chuvaAlta && (tempoAtual - ultimoTempoAlternancia >= 4000)) {
                 estadoExibicao = (estadoExibicao + 1) % 3; // Alterna entre 0 (chuva), 1 (exclamação), 2 (X)
                 ultimoTempoAlternancia = tempoAtual;
-                printf("MatrizLED: Alternando para %s\n",
-                       estadoExibicao == 0 ? "Animação Chuva" :
-                       estadoExibicao == 1 ? "Exclamação Amarela" : "X Vermelho");
+                matriz_clear(); // Limpa antes de mudar o padrão
             }
 
             // Estado 1: Chuva > 80% → Alternar animação de chuva, "!" amarelo e "X" vermelho
@@ -408,6 +407,7 @@ void TaskMatrizLED(void *pvParameters) {
             }
             // Estado 2: Nível > 70% → Apenas "X" vermelho
             else if (nivelAlto && !estadoXAtivo) {
+                matriz_clear();
                 matriz_draw_pattern(PAD_X, cor_vermelho);
                 estadoXAtivo = true;
                 estadoChuvaAtivo = false;
@@ -420,8 +420,6 @@ void TaskMatrizLED(void *pvParameters) {
                 estadoChuvaAtivo = false;
                 estadoExclamacaoAtivo = false;
             }
-        } else {
-            printf("MatrizLED: Falha ao espiar filaDadosSensores\n");
         }
         vTaskDelay(pdMS_TO_TICKS(100)); // Atraso para suportar animação (100ms por quadro)
     }
@@ -431,7 +429,6 @@ void TaskMatrizLED(void *pvParameters) {
 int main() {
     stdio_init_all();
     sleep_ms(2000); // Aguarda o terminal serial
-    printf("\n=== Sistema de Alerta de Enchente - Inicializando ===\n\n");
 
     // Configura o I2C
     i2c_init(I2C_PORT, 100 * 1000);
@@ -439,7 +436,6 @@ int main() {
     gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(I2C_SDA_PIN);
     gpio_pull_up(I2C_SCL_PIN);
-    printf("I2C inicializado em SDA=%d, SCL=%d.\n", I2C_SDA_PIN, I2C_SCL_PIN);
 
     // Inicializa o display OLED
     ssd1306_init(&display, SSD1306_WIDTH, SSD1306_HEIGHT, false, SSD1306_I2C_ADDR, I2C_PORT);
@@ -447,35 +443,30 @@ int main() {
     ssd1306_fill(&display, false);
     ssd1306_draw_string(&display, "Iniciando...", 0, 28, false);
     ssd1306_send_data(&display);
-    printf("Display OLED inicializado.\n");
 
     // Inicializa a matriz de LEDs
     inicializar_matriz_led();
-    printf("Matriz de LEDs inicializada.\n");
 
     // Cria as filas
-    filaDadosSensores = xQueueCreate(10, sizeof(dadosSensores_t));
+    filaDadosSensores = xQueueCreate(20, sizeof(dadosSensores_t));
     filaDadosExibicao = xQueueCreate(5, sizeof(dadosPrevisao_t));
     if (filaDadosSensores == NULL || filaDadosExibicao == NULL) {
-        printf("Erro: falha ao criar filas!\n");
-        while(1);
+        while(1); // Para o sistema em caso de falha
     }
-    printf("Filas criadas.\n");
+    xQueueReset(filaDadosSensores);
+    xQueueReset(filaDadosExibicao);
 
     // Cria as tasks
     xTaskCreate(TaskMedicao, "Leitura", 512, NULL, 2, NULL);
     xTaskCreate(TaskPrevisao, "Previsao", configMINIMAL_STACK_SIZE + 256, NULL, 1, NULL);
-    xTaskCreate(TaskDisplay, "Exibicao", configMINIMAL_STACK_SIZE + 512, NULL, 1, NULL);
-    xTaskCreate(TaskMatrizLED, "MatrizLED", configMINIMAL_STACK_SIZE + 768, NULL, 1, NULL);
-    printf("Tasks criadas.\n");
+    xTaskCreate(TaskDisplay, "Exibicao", configMINIMAL_STACK_SIZE + 1024, NULL, 1, NULL);
+    xTaskCreate(TaskMatrizLED, "MatrizLED", configMINIMAL_STACK_SIZE + 1024, NULL, 1, NULL);
 
     // Inicia o sistema
-    printf("Iniciando o FreeRTOS...\n");
     vTaskStartScheduler();
 
     // Se chegar aqui, houve erro
     while (true) {
-        printf("Erro: FreeRTOS não iniciou!\n");
         sleep_ms(1000);
     }
 
