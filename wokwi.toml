@@ -1,0 +1,4 @@
+[wokwi]
+version = 1
+firmware = 'build/RTOS_filas.uf2'
+elf = 'build/RTOS_filas.elf'

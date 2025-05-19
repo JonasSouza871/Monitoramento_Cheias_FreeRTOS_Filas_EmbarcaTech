@@ -176,7 +176,7 @@ void TaskMedicao(void *pvParameters) {
     }
 }
 
-// Task que faz a previsão (MODIFICADA)
+// Task que faz a previsão
 void TaskPrevisao(void *pvParameters) {
     dadosSensores_t dadosRecebidos;
     dadosPrevisao_t dadosEnviar;
@@ -333,8 +333,8 @@ void TaskDisplay(void *pvParameters) {
                 ssd1306_line(&display, graficoX, graficoY, graficoX, graficoY - alturaGrafico, true);
                 int n = (contagemGrafico < TAMANHO_GRAFICO) ? contagemGrafico : TAMANHO_GRAFICO;
                 for (int i = 0; i < n - 1; i++) {
-                    int idxAtual = (indiceGrafico - n + i + TAMANHO_HISTORICO) % TAMANHO_GRAFICO;
-                    int idxProximo = (indiceGrafico - n + i + 1 + TAMANHO_HISTORICO) % TAMANHO_GRAFICO;
+                    int idxAtual = (indiceGrafico - n + i + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
+                    int idxProximo = (indiceGrafico - n + i + 1 + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
                     float nivelAtual = dadosGraficoNivel[idxAtual]; float nivelProximo = dadosGraficoNivel[idxProximo];
                     uint8_t yAtual = graficoY - (uint8_t)(nivelAtual * alturaGrafico / 100.0f);
                     uint8_t yProximo = graficoY - (uint8_t)(nivelProximo * alturaGrafico / 100.0f);
@@ -398,7 +398,7 @@ void TaskMatrizLED(void *pvParameters) {
                     first_entry_chuva_alta_after_no_chuva = true;
                     estadoExibicao = 0;
                 }
-                } else {
+            } else {
                 matriz_clear();
                 first_entry_chuva_alta_after_no_chuva = true;
                 estadoExibicao = 0;
