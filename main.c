@@ -19,7 +19,8 @@
 #define BUTTON_A_PIN 5
 #define ADC_JOYSTICK_X_PIN 27 // GPIO 27 → ADC1 (nível de água)
 #define ADC_JOYSTICK_Y_PIN 26 // GPIO 26 → ADC0 (volume de chuva)
-#define LED_PIN 13 // Pino do LED vermelho
+#define LED_PIN 13 // Pino do LED vermelho (nome mantido, mas representa o VERMELHO)
+#define LED_VERDE_PIN 11 // Pino do LED verde
 
 // Estrutura para armazenar dados dos sensores
 typedef struct {
@@ -79,11 +80,18 @@ adc_init();
 adc_gpio_init(ADC_JOYSTICK_X_PIN);
 adc_gpio_init(ADC_JOYSTICK_Y_PIN);
 
-// Configura o pino do LED como saída
-gpio_init(LED_PIN);
+// Configura os pinos dos LEDs como saída
+gpio_init(LED_PIN); // LED Vermelho
 gpio_set_dir(LED_PIN, GPIO_OUT);
+gpio_put(LED_PIN, 0); // Começa apagado
+
+gpio_init(LED_VERDE_PIN); // LED Verde
+gpio_set_dir(LED_VERDE_PIN, GPIO_OUT);
+gpio_put(LED_VERDE_PIN, 0); // Começa apagado
 
 dadosSensores_t dados;
+static uint32_t ultimoTempoPiscoLedVermelho = 0;
+static bool estadoPiscoLedVermelho = false;
 
 while (true) {
     // Lê os sensores
@@ -96,7 +104,11 @@ while (true) {
     dados.volumeChuvaPercent = (dados.volumeChuvaRaw / 4095.0f) * 100.0f;
 
     dados.volumeChuvaMmH = percentualParaMmH(dados.volumeChuvaPercent);
+    // A definição de alertaRiscoEnchente pode ou não alinhar com a nova lógica dos LEDs.
+    // Por enquanto, manteremos a definição original de alertaRiscoEnchente para o display e matriz.
+    // A lógica dos LEDs físicos será independente e mais granular.
     dados.alertaRiscoEnchente = (dados.nivelAguaPercent >= 70.0f || dados.volumeChuvaPercent >= 80.0f);
+
 
     // Envia os dados para a fila
     xQueueSend(filaDadosSensores, &dados, pdMS_TO_TICKS(10));
@@ -116,14 +128,43 @@ while (true) {
         ultimoTempoGrafico = tempoAtual;
     }
 
-    // Controla o LED com base no alertaRiscoEnchente
-    if (dados.alertaRiscoEnchente) {
-        gpio_put(LED_PIN, 1); // Acende o LED
-    } else {
-        gpio_put(LED_PIN, 0); // Apaga o LED
+    // Lógica de controle dos LEDs Verde e Vermelho (nova ordem de prioridade)
+
+    // Prioridade 1: Nível > 95% (Vermelho Piscando)
+    if (dados.nivelAguaPercent > 95.0f) {
+        gpio_put(LED_VERDE_PIN, 0); // Verde sempre apagado
+        if ((tempoAtual - ultimoTempoPiscoLedVermelho) >= 500) {
+            estadoPiscoLedVermelho = !estadoPiscoLedVermelho;
+            gpio_put(LED_PIN, estadoPiscoLedVermelho); // LED_PIN é o Vermelho
+            ultimoTempoPiscoLedVermelho = tempoAtual;
+        }
+    }
+    // Prioridade 2: Nível < 70% E Chuva > 80% (Amarelo = Verde + Vermelho acesos)
+    else if (dados.nivelAguaPercent < 70.0f && dados.volumeChuvaPercent > 80.0f) {
+        gpio_put(LED_VERDE_PIN, 1); // Verde aceso
+        gpio_put(LED_PIN, 1);     // Vermelho aceso
+        estadoPiscoLedVermelho = false; // Garante que o estado de pisco seja resetado
+    }
+    // Prioridade 3: Nível >= 70% e < 95% E Chuva > 80% (Vermelho Fixo)
+    else if (dados.nivelAguaPercent >= 70.0f && dados.nivelAguaPercent < 95.0f && dados.volumeChuvaPercent > 80.0f) {
+        gpio_put(LED_VERDE_PIN, 0); // Verde apagado
+        gpio_put(LED_PIN, 1);     // Vermelho aceso fixo
+        estadoPiscoLedVermelho = false; // Garante que o estado de pisco seja resetado
+    }
+    // Prioridade 4: Nível < 70% E Chuva <= 80% (Verde Fixo)
+    else if (dados.nivelAguaPercent < 70.0f && dados.volumeChuvaPercent <= 80.0f) { // <= 80% para cobrir o normal
+        gpio_put(LED_VERDE_PIN, 1); // Verde aceso
+        gpio_put(LED_PIN, 0);     // Vermelho apagado
+        estadoPiscoLedVermelho = false; // Garante que o estado de pisco seja resetado
+    }
+    // Outras combinações (ambos apagados)
+    else {
+        gpio_put(LED_VERDE_PIN, 0); // Verde apagado
+        gpio_put(LED_PIN, 0);     // Vermelho apagado
+        estadoPiscoLedVermelho = false; // Garante que o estado de pisco seja resetado
     }
 
-    vTaskDelay(pdMS_TO_TICKS(250));
+    vTaskDelay(pdMS_TO_TICKS(250)); // Delay da TaskMedicao
 }
 }
 
@@ -205,9 +246,8 @@ while (true) {
     }
     estadoBotaoAnterior = estadoBotaoAtual;
 
-    // Pega o estado de alerta mais recente da filaEstadoAlerta
     if (filaEstadoAlerta != NULL) {
-        xQueuePeek(filaEstadoAlerta, &estadoAlertaAtual, 0); // Não bloqueante
+        xQueuePeek(filaEstadoAlerta, &estadoAlertaAtual, 0);
     }
 
     if (xQueuePeek(filaDadosSensores, &dadosSensores, pdMS_TO_TICKS(50)) == pdPASS) {
@@ -220,10 +260,26 @@ while (true) {
             ssd1306_draw_string(&display, buffer, 0, 13, false);
             snprintf(buffer, sizeof(buffer), "Nivel: %.1f%%", dadosSensores.nivelAguaPercent);
             ssd1306_draw_string(&display, buffer, 0, 26, false);
-            snprintf(buffer, sizeof(buffer), "Status: %s", estadoAlertaAtual ? "ALERTA!" : "Normal");
+            snprintf(buffer, sizeof(buffer), "Status: %s", estadoAlertaAtual ? "ALERTA!" : "Normal"); // Baseado na filaEstadoAlerta
             ssd1306_draw_string(&display, buffer, 0, 39, false);
-            const char* cor = estadoAlertaAtual ? "Cor: Vermelho" : "Cor: Verde";
-            ssd1306_draw_string(&display, cor, 0, 52, false);
+
+            // Determina a cor a ser exibida no display baseado na lógica dos LEDs físicos
+            // Isso pode ser um pouco redundante se o "Status: ALERTA!" já indicar perigo.
+            // Mas para ser explícito sobre a cor simulada:
+            const char* corDisplay;
+            if (dadosSensores.nivelAguaPercent > 95.0f) {
+                corDisplay = "Cor: V. Pisc."; // Vermelho Piscando
+            } else if (dadosSensores.nivelAguaPercent < 70.0f && dadosSensores.volumeChuvaPercent > 80.0f) {
+                corDisplay = "Cor: Amarelo"; // Amarelo
+            } else if (dadosSensores.nivelAguaPercent >= 70.0f && dadosSensores.nivelAguaPercent < 95.0f && dadosSensores.volumeChuvaPercent > 80.0f) {
+                corDisplay = "Cor: Vermelho"; // Vermelho Fixo
+            } else if (dadosSensores.nivelAguaPercent < 70.0f && dadosSensores.volumeChuvaPercent <= 80.0f) {
+                corDisplay = "Cor: Verde";    // Verde
+            } else {
+                corDisplay = "Cor: Apagado";  // Apagado
+            }
+            ssd1306_draw_string(&display, corDisplay, 0, 52, false);
+
         } else if (telaAtual == 1) {
             ssd1306_draw_string(&display, "Barra Chuva:", 0, 0, false);
             uint8_t barYChuva = 10, barWidth = SSD1306_WIDTH - 20, barHeight = 8;
@@ -327,25 +383,26 @@ while (true) {
 void TaskMatrizLED(void *pvParameters) {
 dadosSensores_t dados;
 bool estadoAlertaRecebido = false; // Default para Normal
-const uint32_t cor_vermelho = COR_VERMELHO;
-const uint32_t cor_azul = COR_AZUL;
-const uint32_t cor_amarelo = COR_AMARELO;
+const uint32_t cor_vermelho_matriz = COR_VERMELHO; // Renomeado para evitar conflito com cor_vermelho no display
+const uint32_t cor_azul_matriz = COR_AZUL;       // Renomeado
+const uint32_t cor_amarelo_matriz = COR_AMARELO;   // Renomeado
 uint8_t estadoExibicao = 0;
 uint32_t ultimoTempoAlternancia = 0;
 static bool first_entry_chuva_alta_after_no_chuva = true;
 
 while (true) {
-    // Pega o estado de alerta mais recente da filaEstadoAlerta
     if (filaEstadoAlerta != NULL) {
-        xQueuePeek(filaEstadoAlerta, &estadoAlertaRecebido, 0); // Não bloqueante
+        xQueuePeek(filaEstadoAlerta, &estadoAlertaRecebido, 0);
     }
 
     if (xQueuePeek(filaDadosSensores, &dados, pdMS_TO_TICKS(100)) == pdPASS) {
-        bool chuvaAlta = (dados.volumeChuvaPercent > 80.0f);
+        bool chuvaAlta = (dados.volumeChuvaPercent > 80.0f); // Usado para lógica da matriz
         uint32_t tempoAtual = to_ms_since_boot(get_absolute_time());
 
+        // A lógica da matriz de LEDs é baseada no estadoAlertaRecebido e chuvaAlta.
+        // O estadoAlertaRecebido é definido por (dados.nivelAguaPercent >= 70.0f || dados.volumeChuvaPercent >= 80.0f)
         if (estadoAlertaRecebido) {
-            if (chuvaAlta) {
+            if (chuvaAlta) { // Se alerta e especificamente chuva alta
                 if (first_entry_chuva_alta_after_no_chuva) {
                     estadoExibicao = 0;
                     ultimoTempoAlternancia = tempoAtual;
@@ -356,18 +413,18 @@ while (true) {
                 }
 
                 if (estadoExibicao == 0) {
-                    matriz_draw_rain_animation(cor_azul);
+                    matriz_draw_rain_animation(cor_azul_matriz);
                 } else if (estadoExibicao == 1) {
-                    matriz_draw_pattern(PAD_EXC, cor_amarelo);
+                    matriz_draw_pattern(PAD_EXC, cor_amarelo_matriz);
                 } else {
-                    matriz_draw_pattern(PAD_X, cor_vermelho);
+                    matriz_draw_pattern(PAD_X, cor_vermelho_matriz);
                 }
-            } else {
-                matriz_draw_pattern(PAD_X, cor_vermelho);
+            } else { // Alerta, mas não chuvaAlta (implica nivelAguaPercent >= 70%)
+                matriz_draw_pattern(PAD_X, cor_vermelho_matriz);
                 first_entry_chuva_alta_after_no_chuva = true;
                 estadoExibicao = 0;
             }
-        } else {
+        } else { // Sem alerta
             matriz_clear();
             first_entry_chuva_alta_after_no_chuva = true;
             estadoExibicao = 0;
@@ -398,7 +455,7 @@ inicializar_matriz_led();
 
 filaDadosSensores = xQueueCreate(10, sizeof(dadosSensores_t));
 filaDadosExibicao = xQueueCreate(5, sizeof(dadosPrevisao_t));
-filaEstadoAlerta = xQueueCreate(1, sizeof(bool)); // Fila para estado de alerta com tamanho 1
+filaEstadoAlerta = xQueueCreate(1, sizeof(bool));
 if (filaDadosSensores == NULL || filaDadosExibicao == NULL || filaEstadoAlerta == NULL) {
     while(1);
 }
