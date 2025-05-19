@@ -176,23 +176,25 @@ void TaskMedicao(void *pvParameters) {
     }
 }
 
-// Task que faz a previsão
+// Task que faz a previsão (MODIFICADA)
 void TaskPrevisao(void *pvParameters) {
     dadosSensores_t dadosRecebidos;
     dadosPrevisao_t dadosEnviar;
+    const float fatorChuva = 0.1f; // Coeficiente ajustável para o impacto da chuva
+
     while (true) {
         if (xQueueReceive(filaDadosSensores, &dadosRecebidos, pdMS_TO_TICKS(100)) == pdPASS) {
+            // Atualiza o histórico
             historicoNivelAgua[indiceHistorico] = dadosRecebidos.nivelAguaPercent;
             historicoVolumeChuva[indiceHistorico] = dadosRecebidos.volumeChuvaMmH;
             indiceHistorico = (indiceHistorico + 1) % TAMANHO_HISTORICO;
             if (contagemHistorico < TAMANHO_HISTORICO) contagemHistorico++;
 
+            // Calcula a inclinação (tendência) do nível de água
             float inclinacao = 0.0f;
-            if (contagemHistorico < 2) {
-                inclinacao = 0.0f;
-            } else {
+            if (contagemHistorico >= 2) {
                 float somaX = 0.0f, somaY = 0.0f, somaXY = 0.0f, somaX2 = 0.0f;
-                int n = (contagemHistorico < TAMANHO_HISTORICO) ? contagemHistorico : TAMANHO_HISTORICO;
+                int n = contagemHistorico;
                 for (int i = 0; i < n; i++) {
                     float x_val = (float)i;
                     float y_val = historicoNivelAgua[(indiceHistorico - n + i + TAMANHO_HISTORICO) % TAMANHO_HISTORICO];
@@ -202,16 +204,21 @@ void TaskPrevisao(void *pvParameters) {
                     somaX2 += x_val * x_val;
                 }
                 float denominador = n * somaX2 - somaX * somaX;
-                if (denominador == 0.0f) {
-                    inclinacao = 0.0f;
-                } else {
+                if (denominador != 0.0f) {
                     inclinacao = (n * somaXY - somaX * somaY) / denominador;
                 }
             }
+
+            // Previsão do nível de água com ajuste pela chuva
             float intervalosFuturos = 10.0f;
-            float nivelPrevisto = dadosRecebidos.nivelAguaPercent + inclinacao * intervalosFuturos;
+            float nivelPrevisto = dadosRecebidos.nivelAguaPercent + (inclinacao * intervalosFuturos);
+            float chuvaAtual = dadosRecebidos.volumeChuvaMmH;
+            nivelPrevisto += fatorChuva * chuvaAtual;
+
+            // Limita a previsão entre 0% e 100%
             if (nivelPrevisto < 0.0f) nivelPrevisto = 0.0f;
             else if (nivelPrevisto > 100.0f) nivelPrevisto = 100.0f;
+
             dadosEnviar.nivelAguaPrevisto = nivelPrevisto;
             xQueueSend(filaDadosExibicao, &dadosEnviar, pdMS_TO_TICKS(10));
         }
@@ -391,7 +398,7 @@ void TaskMatrizLED(void *pvParameters) {
                     first_entry_chuva_alta_after_no_chuva = true;
                     estadoExibicao = 0;
                 }
-            } else {
+                } else {
                 matriz_clear();
                 first_entry_chuva_alta_after_no_chuva = true;
                 estadoExibicao = 0;
