@@ -3,493 +3,498 @@
 #include "pico/stdlib.h"
 #include "hardware/adc.h"
 #include "hardware/i2c.h"
-#include "hardware/pwm.h"  // Added for PWM support
+#include "hardware/pwm.h"  // Biblioteca para suporte a PWM
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
 #include "ssd1306.h"
 #include "matriz_led.h"
 
-// DEFINIÇÕES DO DISPLAY OLED
+// --- DEFINIÇÕES DE PINOS E CONSTANTES ---
 #define I2C_PORT i2c1
-#define I2C_SDA_PIN 14
-#define I2C_SCL_PIN 15
-#define SSD1306_I2C_ADDR   0x3C
-#define SSD1306_WIDTH      128
-#define SSD1306_HEIGHT     64
-#define BUTTON_A_PIN 5
-#define ADC_JOYSTICK_X_PIN 27 // GPIO 27 → ADC1 (nível de água)
-#define ADC_JOYSTICK_Y_PIN 26 // GPIO 26 → ADC0 (volume de chuva)
-#define LED_PIN 13 // Pino do LED vermelho
-#define LED_VERDE_PIN 11 // Pino do LED verde
-#define BUZZER_PIN 10 // Pino do Buzzer
+#define I2C_SDA_PIN 14              // Pino SDA para comunicação I2C
+#define I2C_SCL_PIN 15              // Pino SCL para comunicação I2C
+#define SSD1306_I2C_ADDR 0x3C       // Endereço I2C do display OLED
+#define SSD1306_WIDTH 128           // Largura do display OLED
+#define SSD1306_HEIGHT 64           // Altura do display OLED
+#define BUTTON_A_PIN 5              // Pino do botão A
+#define ADC_JOYSTICK_X_PIN 27       // GPIO 27 → ADC1 (nível de água)
+#define ADC_JOYSTICK_Y_PIN 26       // GPIO 26 → ADC0 (volume de chuva)
+#define LED_PIN 13                  // Pino do LED vermelho
+#define LED_VERDE_PIN 11            // Pino do LED verde
+#define BUZZER_PIN 10               // Pino do buzzer
 
-// Estrutura para armazenar dados dos sensores
+// --- ESTRUTURAS DE DADOS ---
 typedef struct {
-    uint16_t nivelAguaRaw;         // Valor bruto do nível de água
-    uint16_t volumeChuvaRaw;       // Valor bruto do volume de chuva
-    float nivelAguaPercent;        // Nível de água em porcentagem
-    float volumeChuvaPercent;      // Volume de chuva em porcentagem
-    float volumeChuvaMmH;          // Volume de chuva em mm/h
-    bool alertaRiscoEnchente;      // Indica se há risco de enchente
-} dadosSensores_t;
+    uint16_t nivel_agua_raw;        // Valor bruto do nível de água lido pelo ADC
+    uint16_t volume_chuva_raw;      // Valor bruto do volume de chuva lido pelo ADC
+    float nivel_agua_percent;       // Nível de água em porcentagem (0-100%)
+    float volume_chuva_percent;     // Volume de chuva em porcentagem (0-100%)
+    float volume_chuva_mmh;         // Volume de chuva convertido para mm/h
+    bool alerta_risco_enchente;     // Indica se há risco de enchente
+} dados_sensores_t;
 
-// Estrutura para dados de previsão
 typedef struct {
-    float nivelAguaPrevisto;       // Previsão do nível de água
-} dadosPrevisao_t;
+    float nivel_agua_previsto;      // Previsão do nível de água em porcentagem
+} dados_previsao_t;
 
-// Filas para comunicação entre tarefas
-static QueueHandle_t filaDadosSensores = NULL;
-static QueueHandle_t filaDadosExibicao = NULL;
-static QueueHandle_t filaEstadoAlerta = NULL;
+// --- FILAS PARA COMUNICAÇÃO ENTRE TAREFAS ---
+static QueueHandle_t fila_dados_sensores = NULL;   // Fila para dados dos sensores
+static QueueHandle_t fila_dados_exibicao = NULL;   // Fila para dados de previsão
+static QueueHandle_t fila_estado_alerta = NULL;    // Fila para estado de alerta
 
-// Instância do display OLED
-static ssd1306_t display;
+// --- VARIÁVEIS GLOBAIS ---
+static ssd1306_t display;                          // Instância do display OLED
 
 // Histórico para previsão (buffer circular)
 #define TAMANHO_HISTORICO 5
-static float historicoNivelAgua[TAMANHO_HISTORICO];
-static float historicoVolumeChuva[TAMANHO_HISTORICO];
-static int indiceHistorico = 0;
-static int contagemHistorico = 0;
+static float historico_nivel_agua[TAMANHO_HISTORICO];    // Histórico de níveis de água
+static float historico_volume_chuva[TAMANHO_HISTORICO];  // Histórico de volumes de chuva
+static int indice_historico = 0;                         // Índice atual do histórico
+static int contagem_historico = 0;                       // Contagem de entradas no histórico
 
-// Buffers para dados dos gráficos
+// Buffers para gráficos no display
 #define TAMANHO_GRAFICO 10
-static float dadosGraficoChuva[TAMANHO_GRAFICO];
-static float dadosGraficoNivel[TAMANHO_GRAFICO];
-static int indiceGrafico = 0;
-static int contagemGrafico = 0;
-static uint32_t ultimoTempoGrafico = 0;
+static float dados_grafico_chuva[TAMANHO_GRAFICO];   // Dados de chuva para gráfico
+static float dados_grafico_nivel[TAMANHO_GRAFICO];   // Dados de nível para gráfico
+static int indice_grafico = 0;                       // Índice atual do gráfico
+static int contagem_grafico = 0;                     // Contagem de entradas no gráfico
+static uint32_t ultimo_tempo_grafico = 0;            // Última atualização do gráfico
 
-// FUNÇÕES AUXILIARES
+// --- FUNÇÕES AUXILIARES ---
 
-// Converte percentual de chuva para mm/h
-float percentualParaMmH(float percentual) {
+// Converte percentual de chuva para mm/h baseado em faixas predefinidas
+float percentual_para_mmh(float percentual) {
     if (percentual <= 0.0f) return 0.0f;
-    else if (percentual < 30.0f) return (percentual / 30.0f) * 5.0f;
-    else if (percentual < 60.0f) return 5.0f + ((percentual - 30.0f) / 30.0f) * 10.0f;
-    else if (percentual < 80.0f) return 15.0f + ((percentual - 60.0f) / 20.0f) * 15.0f;
-    else if (percentual < 95.0f) return 30.0f + ((percentual - 80.0f) / 15.0f) * 5.0f;
-    else return 35.0f;
+    else if (percentual < 30.0f) return (percentual / 30.0f) * 5.0f;         // 0-5 mm/h
+    else if (percentual < 60.0f) return 5.0f + ((percentual - 30.0f) / 30.0f) * 10.0f; // 5-15 mm/h
+    else if (percentual < 80.0f) return 15.0f + ((percentual - 60.0f) / 20.0f) * 15.0f; // 15-30 mm/h
+    else if (percentual < 95.0f) return 30.0f + ((percentual - 80.0f) / 15.0f) * 5.0f;  // 30-35 mm/h
+    else return 35.0f; // Máximo de 35 mm/h
 }
 
-// Funções para controlar o buzzer com PWM
-void buzzer_on(uint frequency) {
+// Liga o buzzer com uma frequência específica usando PWM
+void ligar_buzzer(uint frequency) {
     uint slice_num = pwm_gpio_to_slice_num(BUZZER_PIN);
     uint channel = pwm_gpio_to_channel(BUZZER_PIN);
-    
-    // Configura a frequência do PWM
-    pwm_set_clkdiv(slice_num, 125.0f); // Base clock divider (adjust as needed)
-    uint32_t top = 1000000 / frequency - 1; // Calculate TOP value for desired frequency
+
+    pwm_set_clkdiv(slice_num, 125.0f); // Define divisor de clock para PWM
+    uint32_t top = 1000000 / frequency - 1; // Calcula valor TOP para a frequência
     pwm_set_wrap(slice_num, top);
-    pwm_set_chan_level(slice_num, channel, top / 15); //  duty cycle dividido por 15 para diminuir som
-    
-    // Habilita o PWM no pino
-    gpio_set_function(BUZZER_PIN, GPIO_FUNC_PWM);
-    pwm_set_enabled(slice_num, true);
+    pwm_set_chan_level(slice_num, channel, top / 15); // Ciclo de trabalho reduzido
+
+    gpio_set_function(BUZZER_PIN, GPIO_FUNC_PWM); // Configura pino para PWM
+    pwm_set_enabled(slice_num, true); // Habilita PWM
 }
 
-void buzzer_off() {
+// Desliga o buzzer e restaura o pino como GPIO
+void desligar_buzzer() {
     uint slice_num = pwm_gpio_to_slice_num(BUZZER_PIN);
-    pwm_set_enabled(slice_num, false); // Desliga o PWM
-    gpio_init(BUZZER_PIN); // Restaura o pino como GPIO
+    pwm_set_enabled(slice_num, false); // Desativa PWM
+    gpio_init(BUZZER_PIN); // Reinicia o pino
     gpio_set_dir(BUZZER_PIN, GPIO_OUT);
     gpio_put(BUZZER_PIN, 0); // Garante que o buzzer esteja desligado
 }
 
-// TASKS
+// --- TAREFAS ---
 
-// Task que lê os sensores
-void TaskMedicao(void *pvParameters) {
+// Tarefa responsável por ler os sensores e atualizar LEDs
+void tarefa_medicao(void *pvParameters) {
+    // Inicializa o ADC e os pinos correspondentes
     adc_init();
     adc_gpio_init(ADC_JOYSTICK_X_PIN);
     adc_gpio_init(ADC_JOYSTICK_Y_PIN);
 
+    // Configura os LEDs como saídas
     gpio_init(LED_PIN);
     gpio_set_dir(LED_PIN, GPIO_OUT);
     gpio_put(LED_PIN, 0);
-
     gpio_init(LED_VERDE_PIN);
     gpio_set_dir(LED_VERDE_PIN, GPIO_OUT);
     gpio_put(LED_VERDE_PIN, 0);
 
-    dadosSensores_t dados;
-    static uint32_t ultimoTempoPiscoLedVermelho = 0;
-    static bool estadoPiscoLedVermelho = false;
+    dados_sensores_t dados;
+    static uint32_t ultimo_tempo_pisco_led_vermelho = 0;
+    static bool estado_pisco_led_vermelho = false;
 
     while (true) {
+        // Lê o nível de água (ADC1)
         adc_select_input(1);
-        dados.nivelAguaRaw = adc_read();
-        dados.nivelAguaPercent = (dados.nivelAguaRaw / 4095.0f) * 100.0f;
+        dados.nivel_agua_raw = adc_read();
+        dados.nivel_agua_percent = (dados.nivel_agua_raw / 4095.0f) * 100.0f;
 
+        // Lê o volume de chuva (ADC0)
         adc_select_input(0);
-        dados.volumeChuvaRaw = adc_read();
-        dados.volumeChuvaPercent = (dados.volumeChuvaRaw / 4095.0f) * 100.0f;
+        dados.volume_chuva_raw = adc_read();
+        dados.volume_chuva_percent = (dados.volume_chuva_raw / 4095.0f) * 100.0f;
 
-        dados.volumeChuvaMmH = percentualParaMmH(dados.volumeChuvaPercent);
-        dados.alertaRiscoEnchente = (dados.nivelAguaPercent >= 70.0f || dados.volumeChuvaPercent >= 80.0f);
+        // Converte percentual de chuva para mm/h
+        dados.volume_chuva_mmh = percentual_para_mmh(dados.volume_chuva_percent);
 
-        xQueueSend(filaDadosSensores, &dados, pdMS_TO_TICKS(10));
-        if (filaEstadoAlerta != NULL) {
-            xQueueOverwrite(filaEstadoAlerta, &dados.alertaRiscoEnchente);
+        // Define condição de alerta de enchente
+        dados.alerta_risco_enchente = (dados.nivel_agua_percent >= 70.0f || dados.volume_chuva_percent >= 80.0f);
+
+        // Envia dados para as filas
+        xQueueSend(fila_dados_sensores, &dados, pdMS_TO_TICKS(10));
+        if (fila_estado_alerta != NULL) {
+            xQueueOverwrite(fila_estado_alerta, &dados.alerta_risco_enchente);
         }
 
-        uint32_t tempoAtual = to_ms_since_boot(get_absolute_time());
-        if ((tempoAtual - ultimoTempoGrafico) >= 2000) {
-            dadosGraficoChuva[indiceGrafico] = dados.volumeChuvaPercent;
-            dadosGraficoNivel[indiceGrafico] = dados.nivelAguaPercent;
-            indiceGrafico = (indiceGrafico + 1) % TAMANHO_GRAFICO;
-            if (contagemGrafico < TAMANHO_GRAFICO) contagemGrafico++;
-            ultimoTempoGrafico = tempoAtual;
+        // Atualiza os dados do gráfico a cada 2 segundos
+        uint32_t tempo_atual = to_ms_since_boot(get_absolute_time());
+        if ((tempo_atual - ultimo_tempo_grafico) >= 2000) {
+            dados_grafico_chuva[indice_grafico] = dados.volume_chuva_percent;
+            dados_grafico_nivel[indice_grafico] = dados.nivel_agua_percent;
+            indice_grafico = (indice_grafico + 1) % TAMANHO_GRAFICO;
+            if (contagem_grafico < TAMANHO_GRAFICO) contagem_grafico++;
+            ultimo_tempo_grafico = tempo_atual;
         }
 
-        if (dados.nivelAguaPercent > 95.0f) {
+        // Controle dos LEDs com base nas condições
+        if (dados.nivel_agua_percent > 95.0f) {
             gpio_put(LED_VERDE_PIN, 0);
-            if ((tempoAtual - ultimoTempoPiscoLedVermelho) >= 500) {
-                estadoPiscoLedVermelho = !estadoPiscoLedVermelho;
-                gpio_put(LED_PIN, estadoPiscoLedVermelho);
-                ultimoTempoPiscoLedVermelho = tempoAtual;
+            if ((tempo_atual - ultimo_tempo_pisco_led_vermelho) >= 500) {
+                estado_pisco_led_vermelho = !estado_pisco_led_vermelho;
+                gpio_put(LED_PIN, estado_pisco_led_vermelho);
+                ultimo_tempo_pisco_led_vermelho = tempo_atual;
             }
-        }
-        else if (dados.nivelAguaPercent < 70.0f && dados.volumeChuvaPercent > 80.0f) {
+        } else if (dados.nivel_agua_percent < 70.0f && dados.volume_chuva_percent > 80.0f) {
             gpio_put(LED_VERDE_PIN, 1);
             gpio_put(LED_PIN, 1);
-            estadoPiscoLedVermelho = false;
-        }
-        else if (dados.nivelAguaPercent >= 70.0f && dados.nivelAguaPercent < 95.0f && dados.volumeChuvaPercent > 80.0f) {
+            estado_pisco_led_vermelho = false;
+        } else if (dados.nivel_agua_percent >= 70.0f && dados.nivel_agua_percent < 95.0f && dados.volume_chuva_percent > 80.0f) {
             gpio_put(LED_VERDE_PIN, 0);
             gpio_put(LED_PIN, 1);
-            estadoPiscoLedVermelho = false;
-        }
-        else if (dados.nivelAguaPercent < 70.0f && dados.volumeChuvaPercent <= 80.0f) {
+            estado_pisco_led_vermelho = false;
+        } else if (dados.nivel_agua_percent < 70.0f && dados.volume_chuva_percent <= 80.0f) {
             gpio_put(LED_VERDE_PIN, 1);
             gpio_put(LED_PIN, 0);
-            estadoPiscoLedVermelho = false;
-        }
-        else {
+            estado_pisco_led_vermelho = false;
+        } else {
             gpio_put(LED_VERDE_PIN, 0);
             gpio_put(LED_PIN, 0);
-            estadoPiscoLedVermelho = false;
+            estado_pisco_led_vermelho = false;
         }
-        vTaskDelay(pdMS_TO_TICKS(250));
+        vTaskDelay(pdMS_TO_TICKS(250)); // Aguarda 250ms antes da próxima leitura
     }
 }
 
-// Task que faz a previsão
-void TaskPrevisao(void *pvParameters) {
-    dadosSensores_t dadosRecebidos;
-    dadosPrevisao_t dadosEnviar;
-    const float fatorChuva = 0.1f; // Coeficiente ajustável para o impacto da chuva
+// Tarefa que realiza a previsão do nível de água
+void tarefa_previsao(void *pvParameters) {
+    dados_sensores_t dados_recebidos;
+    dados_previsao_t dados_enviar;
+    const float fator_chuva = 0.1f; // Fator de impacto da chuva na previsão
 
     while (true) {
-        if (xQueueReceive(filaDadosSensores, &dadosRecebidos, pdMS_TO_TICKS(100)) == pdPASS) {
-            // Atualiza o histórico
-            historicoNivelAgua[indiceHistorico] = dadosRecebidos.nivelAguaPercent;
-            historicoVolumeChuva[indiceHistorico] = dadosRecebidos.volumeChuvaMmH;
-            indiceHistorico = (indiceHistorico + 1) % TAMANHO_HISTORICO;
-            if (contagemHistorico < TAMANHO_HISTORICO) contagemHistorico++;
+        if (xQueueReceive(fila_dados_sensores, &dados_recebidos, pdMS_TO_TICKS(100)) == pdPASS) {
+            // Atualiza o histórico de dados
+            historico_nivel_agua[indice_historico] = dados_recebidos.nivel_agua_percent;
+            historico_volume_chuva[indice_historico] = dados_recebidos.volume_chuva_mmh;
+            indice_historico = (indice_historico + 1) % TAMANHO_HISTORICO;
+            if (contagem_historico < TAMANHO_HISTORICO) contagem_historico++;
 
-            // Calcula a inclinação (tendência) do nível de água
+            // Calcula a tendência (inclinação) do nível de água
             float inclinacao = 0.0f;
-            if (contagemHistorico >= 2) {
-                float somaX = 0.0f, somaY = 0.0f, somaXY = 0.0f, somaX2 = 0.0f;
-                int n = contagemHistorico;
+            if (contagem_historico >= 2) {
+                float soma_x = 0.0f, soma_y = 0.0f, soma_xy = 0.0f, soma_x2 = 0.0f;
+                int n = contagem_historico;
                 for (int i = 0; i < n; i++) {
                     float x_val = (float)i;
-                    float y_val = historicoNivelAgua[(indiceHistorico - n + i + TAMANHO_HISTORICO) % TAMANHO_HISTORICO];
-                    somaX += x_val;
-                    somaY += y_val;
-                    somaXY += x_val * y_val;
-                    somaX2 += x_val * x_val;
+                    float y_val = historico_nivel_agua[(indice_historico - n + i + TAMANHO_HISTORICO) % TAMANHO_HISTORICO];
+                    soma_x += x_val;
+                    soma_y += y_val;
+                    soma_xy += x_val * y_val;
+                    soma_x2 += x_val * x_val;
                 }
-                float denominador = n * somaX2 - somaX * somaX;
+                float denominador = n * soma_x2 - soma_x * soma_x;
                 if (denominador != 0.0f) {
-                    inclinacao = (n * somaXY - somaX * somaY) / denominador;
+                    inclinacao = (n * soma_xy - soma_x * soma_y) / denominador;
                 }
             }
 
-            // Previsão do nível de água com ajuste pela chuva
-            float intervalosFuturos = 10.0f;
-            float nivelPrevisto = dadosRecebidos.nivelAguaPercent + (inclinacao * intervalosFuturos);
-            float chuvaAtual = dadosRecebidos.volumeChuvaMmH;
-            nivelPrevisto += fatorChuva * chuvaAtual;
+            // Calcula previsão considerando tendência e impacto da chuva
+            float intervalos_futuros = 10.0f;
+            float nivel_previsto = dados_recebidos.nivel_agua_percent + (inclinacao * intervalos_futuros);
+            nivel_previsto += fator_chuva * dados_recebidos.volume_chuva_mmh;
 
             // Limita a previsão entre 0% e 100%
-            if (nivelPrevisto < 0.0f) nivelPrevisto = 0.0f;
-            else if (nivelPrevisto > 100.0f) nivelPrevisto = 100.0f;
+            if (nivel_previsto < 0.0f) nivel_previsto = 0.0f;
+            else if (nivel_previsto > 100.0f) nivel_previsto = 100.0f;
 
-            dadosEnviar.nivelAguaPrevisto = nivelPrevisto;
-            xQueueSend(filaDadosExibicao, &dadosEnviar, pdMS_TO_TICKS(10));
+            dados_enviar.nivel_agua_previsto = nivel_previsto;
+            xQueueSend(fila_dados_exibicao, &dados_enviar, pdMS_TO_TICKS(10));
         }
     }
 }
 
-// Task que exibe no display OLED
-void TaskDisplay(void *pvParameters) {
-    dadosSensores_t dadosSensores;
-    dadosPrevisao_t dadosPrevisao;
-    bool estadoAlertaAtual = false;
+// Tarefa que exibe informações no display OLED
+void tarefa_exibicao(void *pvParameters) {
+    dados_sensores_t dados_sensores;
+    dados_previsao_t dados_previsao;
+    bool estado_alerta_atual = false;
     char buffer[32];
-    uint8_t telaAtual = 0;
+    uint8_t tela_atual = 0;
+
+    // Configura o botão para alternar telas
     gpio_init(BUTTON_A_PIN);
     gpio_set_dir(BUTTON_A_PIN, GPIO_IN);
     gpio_pull_up(BUTTON_A_PIN);
-    bool estadoBotaoAnterior = gpio_get(BUTTON_A_PIN);
-    uint32_t tempoUltimoPressionamento = 0;
-    const uint32_t delayDebounceMs = 200;
+    bool estado_botao_anterior = gpio_get(BUTTON_A_PIN);
+    uint32_t tempo_ultimo_pressionamento = 0;
+    const uint32_t delay_debounce_ms = 200;
 
     while (true) {
-        bool estadoBotaoAtual = gpio_get(BUTTON_A_PIN);
-        uint32_t tempoAtual = to_ms_since_boot(get_absolute_time());
-        if (estadoBotaoAnterior && !estadoBotaoAtual) {
-            if ((tempoAtual - tempoUltimoPressionamento) > delayDebounceMs) {
-                telaAtual = (telaAtual + 1) % 4;
-                tempoUltimoPressionamento = tempoAtual;
-                ssd1306_fill(&display, false);
+        // Detecta pressionamento do botão com debounce
+        bool estado_botao_atual = gpio_get(BUTTON_A_PIN);
+        uint32_t tempo_atual = to_ms_since_boot(get_absolute_time());
+        if (estado_botao_anterior && !estado_botao_atual) {
+            if ((tempo_atual - tempo_ultimo_pressionamento) > delay_debounce_ms) {
+                tela_atual = (tela_atual + 1) % 4;
+                tempo_ultimo_pressionamento = tempo_atual;
+                ssd1306_fill(&display, false); // Limpa o display
             }
         }
-        estadoBotaoAnterior = estadoBotaoAtual;
-        if (filaEstadoAlerta != NULL) {
-            xQueuePeek(filaEstadoAlerta, &estadoAlertaAtual, 0);
+        estado_botao_anterior = estado_botao_atual;
+
+        // Verifica o estado de alerta
+        if (fila_estado_alerta != NULL) {
+            xQueuePeek(fila_estado_alerta, &estado_alerta_atual, 0);
         }
-        if (xQueuePeek(filaDadosSensores, &dadosSensores, pdMS_TO_TICKS(50)) == pdPASS) {
+
+        // Exibe dados no display conforme a tela selecionada
+        if (xQueuePeek(fila_dados_sensores, &dados_sensores, pdMS_TO_TICKS(50)) == pdPASS) {
             ssd1306_fill(&display, false);
-            if (telaAtual == 0) {
-                snprintf(buffer, sizeof(buffer), "QntChuva:%.2fmm", dadosSensores.volumeChuvaMmH);
+            if (tela_atual == 0) {
+                // Tela 1: Informações básicas
+                snprintf(buffer, sizeof(buffer), "QntChuva:%.2fmm", dados_sensores.volume_chuva_mmh);
                 ssd1306_draw_string(&display, buffer, 0, 0, false);
-                snprintf(buffer, sizeof(buffer), "Chuva: %.1f%%", dadosSensores.volumeChuvaPercent);
+                snprintf(buffer, sizeof(buffer), "Chuva: %.1f%%", dados_sensores.volume_chuva_percent);
                 ssd1306_draw_string(&display, buffer, 0, 13, false);
-                snprintf(buffer, sizeof(buffer), "Nivel: %.1f%%", dadosSensores.nivelAguaPercent);
+                snprintf(buffer, sizeof(buffer), "Nivel: %.1f%%", dados_sensores.nivel_agua_percent);
                 ssd1306_draw_string(&display, buffer, 0, 26, false);
-                snprintf(buffer, sizeof(buffer), "Status: %s", estadoAlertaAtual ? "ALERTA!" : "Normal");
+                snprintf(buffer, sizeof(buffer), "Status: %s", estado_alerta_atual ? "ALERTA!" : "Normal");
                 ssd1306_draw_string(&display, buffer, 0, 39, false);
-                const char* corDisplay;
-                if (dadosSensores.nivelAguaPercent > 95.0f) {
-                    corDisplay = "Cor: V. Pisc.";
-                } else if (dadosSensores.nivelAguaPercent < 70.0f && dadosSensores.volumeChuvaPercent > 80.0f) {
-                    corDisplay = "Cor: Amarelo";
-                } else if (dadosSensores.nivelAguaPercent >= 70.0f && dadosSensores.nivelAguaPercent < 95.0f && dadosSensores.volumeChuvaPercent > 80.0f) {
-                    corDisplay = "Cor: Vermelho";
-                } else if (dadosSensores.nivelAguaPercent < 70.0f && dadosSensores.volumeChuvaPercent <= 80.0f) {
-                    corDisplay = "Cor: Verde";
-                } else {
-                    corDisplay = "Cor: Apagado";
-                }
-                ssd1306_draw_string(&display, corDisplay, 0, 52, false);
-            } else if (telaAtual == 1) {
+                const char* cor_display;
+                if (dados_sensores.nivel_agua_percent > 95.0f) cor_display = "Cor: V. Pisc.";
+                else if (dados_sensores.nivel_agua_percent < 70.0f && dados_sensores.volume_chuva_percent > 80.0f) cor_display = "Cor: Amarelo";
+                else if (dados_sensores.nivel_agua_percent >= 70.0f && dados_sensores.nivel_agua_percent < 95.0f && dados_sensores.volume_chuva_percent > 80.0f) cor_display = "Cor: Vermelho";
+                else if (dados_sensores.nivel_agua_percent < 70.0f && dados_sensores.volume_chuva_percent <= 80.0f) cor_display = "Cor: Verde";
+                else cor_display = "Cor: Apagado";
+                ssd1306_draw_string(&display, cor_display, 0, 52, false);
+            } else if (tela_atual == 1) {
+                // Tela 2: Barras de chuva e nível
                 ssd1306_draw_string(&display, "Barra Chuva:", 0, 0, false);
-                uint8_t barYChuva = 10, barWidth = SSD1306_WIDTH - 20, barHeight = 8;
-                ssd1306_rect(&display, barYChuva, 0, barWidth, barHeight, true, false);
-                uint8_t chuvaFill = (uint8_t)(dadosSensores.volumeChuvaPercent * (barWidth - 2) / 100.0f);
-                if (chuvaFill > 0) ssd1306_rect(&display, barYChuva + 1, 1, chuvaFill, barHeight - 2, true, true);
+                uint8_t bar_y_chuva = 10, bar_width = SSD1306_WIDTH - 20, bar_height = 8;
+                ssd1306_rect(&display, bar_y_chuva, 0, bar_width, bar_height, true, false);
+                uint8_t chuva_fill = (uint8_t)(dados_sensores.volume_chuva_percent * (bar_width - 2) / 100.0f);
+                if (chuva_fill > 0) ssd1306_rect(&display, bar_y_chuva + 1, 1, chuva_fill, bar_height - 2, true, true);
                 ssd1306_draw_string(&display, "Barra Nivel:", 0, 25, false);
-                uint8_t barYNivel = 35;
-                ssd1306_rect(&display, barYNivel, 0, barWidth, barHeight, true, false);
-                uint8_t nivelFill = (uint8_t)(dadosSensores.nivelAguaPercent * (barWidth - 2) / 100.0f);
-                if (nivelFill > 0) ssd1306_rect(&display, barYNivel + 1, 1, nivelFill, barHeight - 2, true, true);
-                if (xQueueReceive(filaDadosExibicao, &dadosPrevisao, 0) == pdPASS) {
-                    snprintf(buffer, sizeof(buffer), "Previsao:%.1f%%", dadosPrevisao.nivelAguaPrevisto);
+                uint8_t bar_y_nivel = 35;
+                ssd1306_rect(&display, bar_y_nivel, 0, bar_width, bar_height, true, false);
+                uint8_t nivel_fill = (uint8_t)(dados_sensores.nivel_agua_percent * (bar_width - 2) / 100.0f);
+                if (nivel_fill > 0) ssd1306_rect(&display, bar_y_nivel + 1, 1, nivel_fill, bar_height - 2, true, true);
+                if (xQueueReceive(fila_dados_exibicao, &dados_previsao, 0) == pdPASS) {
+                    snprintf(buffer, sizeof(buffer), "Previsao:%.1f%%", dados_previsao.nivel_agua_previsto);
                 } else {
                     snprintf(buffer, sizeof(buffer), "Previsao: N/A");
                 }
                 ssd1306_draw_string(&display, buffer, 0, 50, false);
-            } else if (telaAtual == 2) {
-                const uint8_t graficoX = 15; const uint8_t graficoY = 54;
-                const uint8_t alturaGrafico = 45; const uint8_t larguraGrafico = 100;
-                const char* titulo = "Chuva %"; uint8_t tituloWidth = strlen(titulo) * 5;
-                uint8_t tituloX_pos = (SSD1306_WIDTH - tituloWidth) / 2;
-                ssd1306_draw_string(&display, titulo, tituloX_pos, 5, true);
-                ssd1306_line(&display, graficoX, graficoY, graficoX + larguraGrafico, graficoY, true);
-                ssd1306_line(&display, graficoX, graficoY, graficoX, graficoY - alturaGrafico, true);
-                int n = (contagemGrafico < TAMANHO_GRAFICO) ? contagemGrafico : TAMANHO_GRAFICO;
+            } else if (tela_atual == 2) {
+                // Tela 3: Gráfico de chuva
+                const uint8_t grafico_x = 15, grafico_y = 54, altura_grafico = 45, largura_grafico = 100;
+                const char* titulo = "Chuva %";
+                uint8_t titulo_width = strlen(titulo) * 5;
+                uint8_t titulo_x_pos = (SSD1306_WIDTH - titulo_width) / 2;
+                ssd1306_draw_string(&display, titulo, titulo_x_pos, 5, true);
+                ssd1306_line(&display, grafico_x, grafico_y, grafico_x + largura_grafico, grafico_y, true);
+                ssd1306_line(&display, grafico_x, grafico_y, grafico_x, grafico_y - altura_grafico, true);
+                int n = (contagem_grafico < TAMANHO_GRAFICO) ? contagem_grafico : TAMANHO_GRAFICO;
                 for (int i = 0; i < n - 1; i++) {
-                    int idxAtual = (indiceGrafico - n + i + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
-                    int idxProximo = (indiceGrafico - n + i + 1 + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
-                    float chuvaAtual = dadosGraficoChuva[idxAtual]; float chuvaProxima = dadosGraficoChuva[idxProximo];
-                    uint8_t yAtual = graficoY - (uint8_t)(chuvaAtual * alturaGrafico / 100.0f);
-                    uint8_t yProximo = graficoY - (uint8_t)(chuvaProxima * alturaGrafico / 100.0f);
-                    uint8_t xAtual = graficoX + (i * larguraGrafico / (TAMANHO_GRAFICO - 1));
-                    uint8_t xProximo = graficoX + ((i + 1) * larguraGrafico / (TAMANHO_GRAFICO - 1));
-                    ssd1306_line(&display, xAtual, yAtual, xProximo, yProximo, true);
+                    int idx_atual = (indice_grafico - n + i + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
+                    int idx_proximo = (indice_grafico - n + i + 1 + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
+                    float chuva_atual = dados_grafico_chuva[idx_atual], chuva_proxima = dados_grafico_chuva[idx_proximo];
+                    uint8_t y_atual = grafico_y - (uint8_t)(chuva_atual * altura_grafico / 100.0f);
+                    uint8_t y_proximo = grafico_y - (uint8_t)(chuva_proxima * altura_grafico / 100.0f);
+                    uint8_t x_atual = grafico_x + (i * largura_grafico / (TAMANHO_GRAFICO - 1));
+                    uint8_t x_proximo = grafico_x + ((i + 1) * largura_grafico / (TAMANHO_GRAFICO - 1));
+                    ssd1306_line(&display, x_atual, y_atual, x_proximo, y_proximo, true);
                 }
                 for (int i = 0; i <= 5; i++) {
-                    uint8_t y_mark = graficoY - (i * alturaGrafico / 5);
-                    ssd1306_line(&display, graficoX - 3, y_mark, graficoX, y_mark, true);
+                    uint8_t y_mark = grafico_y - (i * altura_grafico / 5);
+                    ssd1306_line(&display, grafico_x - 3, y_mark, grafico_x, y_mark, true);
                     if (i % 2 == 0) { snprintf(buffer, sizeof(buffer), "%d", i * 20); ssd1306_draw_string(&display, buffer, 0, y_mark - 3, true); }
                 }
                 for (int i = 0; i <= 4; i++) {
-                    uint8_t x_mark = graficoX + (i * larguraGrafico / 4);
-                    ssd1306_line(&display, x_mark, graficoY, x_mark, graficoY + 2, true);
-                    snprintf(buffer, sizeof(buffer), "%d", i * 5); ssd1306_draw_string(&display, buffer, x_mark - 8, graficoY + 2, true);
+                    uint8_t x_mark = grafico_x + (i * largura_grafico / 4);
+                    ssd1306_line(&display, x_mark, grafico_y, x_mark, grafico_y + 2, true);
+                    snprintf(buffer, sizeof(buffer), "%d", i * 5); ssd1306_draw_string(&display, buffer, x_mark - 8, grafico_y + 2, true);
                 }
-            } else if (telaAtual == 3) {
-                const uint8_t graficoX = 15; const uint8_t graficoY = 54;
-                const uint8_t alturaGrafico = 45; const uint8_t larguraGrafico = 100;
-                const char* titulo = "Nivel %"; uint8_t tituloWidth = strlen(titulo) * 5;
-                uint8_t tituloX_pos = (SSD1306_WIDTH - tituloWidth) / 2;
-                ssd1306_draw_string(&display, titulo, tituloX_pos, 5, true);
-                ssd1306_line(&display, graficoX, graficoY, graficoX + larguraGrafico, graficoY, true);
-                ssd1306_line(&display, graficoX, graficoY, graficoX, graficoY - alturaGrafico, true);
-                int n = (contagemGrafico < TAMANHO_GRAFICO) ? contagemGrafico : TAMANHO_GRAFICO;
+            } else if (tela_atual == 3) {
+                // Tela 4: Gráfico de nível
+                const uint8_t grafico_x = 15, grafico_y = 54, altura_grafico = 45, largura_grafico = 100;
+                const char* titulo = "Nivel %";
+                uint8_t titulo_width = strlen(titulo) * 5;
+                uint8_t titulo_x_pos = (SSD1306_WIDTH - titulo_width) / 2;
+                ssd1306_draw_string(&display, titulo, titulo_x_pos, 5, true);
+                ssd1306_line(&display, grafico_x, grafico_y, grafico_x + largura_grafico, grafico_y, true);
+                ssd1306_line(&display, grafico_x, grafico_y, grafico_x, grafico_y - altura_grafico, true);
+                int n = (contagem_grafico < TAMANHO_GRAFICO) ? contagem_grafico : TAMANHO_GRAFICO;
                 for (int i = 0; i < n - 1; i++) {
-                    int idxAtual = (indiceGrafico - n + i + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
-                    int idxProximo = (indiceGrafico - n + i + 1 + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
-                    float nivelAtual = dadosGraficoNivel[idxAtual]; float nivelProximo = dadosGraficoNivel[idxProximo];
-                    uint8_t yAtual = graficoY - (uint8_t)(nivelAtual * alturaGrafico / 100.0f);
-                    uint8_t yProximo = graficoY - (uint8_t)(nivelProximo * alturaGrafico / 100.0f);
-                    uint8_t xAtual = graficoX + (i * larguraGrafico / (TAMANHO_GRAFICO - 1));
-                    uint8_t xProximo = graficoX + ((i + 1) * larguraGrafico / (TAMANHO_GRAFICO - 1));
-                    ssd1306_line(&display, xAtual, yAtual, xProximo, yProximo, true);
+                    int idx_atual = (indice_grafico - n + i + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
+                    int idx_proximo = (indice_grafico - n + i + 1 + TAMANHO_GRAFICO) % TAMANHO_GRAFICO;
+                    float nivel_atual = dados_grafico_nivel[idx_atual], nivel_proximo = dados_grafico_nivel[idx_proximo];
+                    uint8_t y_atual = grafico_y - (uint8_t)(nivel_atual * altura_grafico / 100.0f);
+                    uint8_t y_proximo = grafico_y - (uint8_t)(nivel_proximo * altura_grafico / 100.0f);
+                    uint8_t x_atual = grafico_x + (i * largura_grafico / (TAMANHO_GRAFICO - 1));
+                    uint8_t x_proximo = grafico_x + ((i + 1) * largura_grafico / (TAMANHO_GRAFICO - 1));
+                    ssd1306_line(&display, x_atual, y_atual, x_proximo, y_proximo, true);
                 }
                 for (int i = 0; i <= 5; i++) {
-                    uint8_t y_mark = graficoY - (i * alturaGrafico / 5);
-                    ssd1306_line(&display, graficoX - 3, y_mark, graficoX, y_mark, true);
+                    uint8_t y_mark = grafico_y - (i * altura_grafico / 5);
+                    ssd1306_line(&display, grafico_x - 3, y_mark, grafico_x, y_mark, true);
                     if (i % 2 == 0) { snprintf(buffer, sizeof(buffer), "%d", i * 20); ssd1306_draw_string(&display, buffer, 0, y_mark - 3, true); }
                 }
                 for (int i = 0; i <= 4; i++) {
-                    uint8_t x_mark = graficoX + (i * larguraGrafico / 4);
-                    ssd1306_line(&display, x_mark, graficoY, x_mark, graficoY + 2, true);
-                    snprintf(buffer, sizeof(buffer), "%d", i * 5); ssd1306_draw_string(&display, buffer, x_mark - 8, graficoY + 2, true);
+                    uint8_t x_mark = grafico_x + (i * largura_grafico / 4);
+                    ssd1306_line(&display, x_mark, grafico_y, x_mark, grafico_y + 2, true);
+                    snprintf(buffer, sizeof(buffer), "%d", i * 5); ssd1306_draw_string(&display, buffer, x_mark - 8, grafico_y + 2, true);
                 }
             }
-            ssd1306_send_data(&display);
+            ssd1306_send_data(&display); // Atualiza o display
         }
     }
 }
 
-// Task que controla a matriz de LEDs
-void TaskMatrizLED(void *pvParameters) {
-    dadosSensores_t dados;
-    bool estadoAlertaRecebido = false;
+// Tarefa que controla a matriz de LEDs
+void tarefa_matriz_led(void *pvParameters) {
+    dados_sensores_t dados;
+    bool estado_alerta_recebido = false;
     const uint32_t cor_vermelho_matriz = COR_VERMELHO;
     const uint32_t cor_azul_matriz = COR_AZUL;
     const uint32_t cor_amarelo_matriz = COR_AMARELO;
-    uint8_t estadoExibicao = 0;
-    uint32_t ultimoTempoAlternancia = 0;
-    static bool first_entry_chuva_alta_after_no_chuva = true;
+    uint8_t estado_exibicao = 0;
+    uint32_t ultimo_tempo_alternancia = 0;
+    static bool primeira_entrada_chuva_alta_apos_sem_chuva = true;
 
     while (true) {
-        if (filaEstadoAlerta != NULL) {
-            xQueuePeek(filaEstadoAlerta, &estadoAlertaRecebido, 0);
+        // Verifica o estado de alerta e os dados dos sensores
+        if (fila_estado_alerta != NULL) {
+            xQueuePeek(fila_estado_alerta, &estado_alerta_recebido, 0);
         }
-        if (xQueuePeek(filaDadosSensores, &dados, pdMS_TO_TICKS(100)) == pdPASS) {
-            bool chuvaAlta = (dados.volumeChuvaPercent > 80.0f);
-            uint32_t tempoAtual = to_ms_since_boot(get_absolute_time());
-            if (estadoAlertaRecebido) {
-                if (chuvaAlta) {
-                    if (first_entry_chuva_alta_after_no_chuva) {
-                        estadoExibicao = 0;
-                        ultimoTempoAlternancia = tempoAtual;
-                        first_entry_chuva_alta_after_no_chuva = false;
-                    } else if ((tempoAtual - ultimoTempoAlternancia >= 4000)) {
-                        estadoExibicao = (estadoExibicao + 1) % 3;
-                        ultimoTempoAlternancia = tempoAtual;
+        if (xQueuePeek(fila_dados_sensores, &dados, pdMS_TO_TICKS(100)) == pdPASS) {
+            bool chuva_alta = (dados.volume_chuva_percent > 80.0f);
+            uint32_t tempo_atual = to_ms_since_boot(get_absolute_time());
+            if (estado_alerta_recebido) {
+                if (chuva_alta) {
+                    // Alterna exibições a cada 4 segundos
+                    if (primeira_entrada_chuva_alta_apos_sem_chuva) {
+                        estado_exibicao = 0;
+                        ultimo_tempo_alternancia = tempo_atual;
+                        primeira_entrada_chuva_alta_apos_sem_chuva = false;
+                    } else if ((tempo_atual - ultimo_tempo_alternancia) >= 4000) {
+                        estado_exibicao = (estado_exibicao + 1) % 3;
+                        ultimo_tempo_alternancia = tempo_atual;
                     }
-                    if (estadoExibicao == 0) {
-                        matriz_draw_rain_animation(cor_azul_matriz);
-                    } else if (estadoExibicao == 1) {
-                        matriz_draw_pattern(PAD_EXC, cor_amarelo_matriz);
-                    } else {
-                        matriz_draw_pattern(PAD_X, cor_vermelho_matriz);
-                    }
+                    if (estado_exibicao == 0) matriz_draw_rain_animation(cor_azul_matriz);
+                    else if (estado_exibicao == 1) matriz_draw_pattern(PAD_EXC, cor_amarelo_matriz);
+                    else matriz_draw_pattern(PAD_X, cor_vermelho_matriz);
                 } else {
                     matriz_draw_pattern(PAD_X, cor_vermelho_matriz);
-                    first_entry_chuva_alta_after_no_chuva = true;
-                    estadoExibicao = 0;
+                    primeira_entrada_chuva_alta_apos_sem_chuva = true;
+                    estado_exibicao = 0;
                 }
             } else {
-                matriz_clear();
-                first_entry_chuva_alta_after_no_chuva = true;
-                estadoExibicao = 0;
+                matriz_clear(); // Limpa a matriz se não houver alerta
+                primeira_entrada_chuva_alta_apos_sem_chuva = true;
+                estado_exibicao = 0;
             }
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
-// Task que controla o buzzer
-void TaskBuzzer(void *pvParameters) {
-    dadosSensores_t dadosAtuais;
+// Tarefa que controla o buzzer com base nas condições
+void tarefa_buzzer(void *pvParameters) {
+    dados_sensores_t dados_atuais;
 
     while (true) {
-        if (xQueuePeek(filaDadosSensores, &dadosAtuais, pdMS_TO_TICKS(50)) == pdPASS) {
-            float nivel = dadosAtuais.nivelAguaPercent;
-            float chuva = dadosAtuais.volumeChuvaPercent;
+        if (xQueuePeek(fila_dados_sensores, &dados_atuais, pdMS_TO_TICKS(50)) == pdPASS) {
+            float nivel = dados_atuais.nivel_agua_percent;
+            float chuva = dados_atuais.volume_chuva_percent;
 
-            // Prioridade 1: Nível > 70% E Chuva > 80%
             if (nivel > 70.0f && chuva > 80.0f) {
-                buzzer_on(1000); // "BEEP" de 1000 Hz
+                // Alerta prioritário: nível alto e chuva intensa
+                ligar_buzzer(1000);
                 vTaskDelay(pdMS_TO_TICKS(1000));
-                buzzer_off();
+                desligar_buzzer();
                 vTaskDelay(pdMS_TO_TICKS(500));
-            }
-            // Prioridade 2: Chuva > 80% (e Nível <= 70%)
-            else if (chuva > 80.0f) {
-                buzzer_on(1000);
+            } else if (chuva > 80.0f) {
+                // Alerta de chuva intensa: dois beeps curtos
+                ligar_buzzer(1000);
                 vTaskDelay(pdMS_TO_TICKS(150));
-                buzzer_off();
+                desligar_buzzer();
                 vTaskDelay(pdMS_TO_TICKS(150));
-                buzzer_on(1000);
+                ligar_buzzer(1000);
                 vTaskDelay(pdMS_TO_TICKS(150));
-                buzzer_off();
+                desligar_buzzer();
                 vTaskDelay(pdMS_TO_TICKS(150));
-            }
-            // Prioridade 3: Nível > 70% (e Chuva <= 80%)
-            else if (nivel > 70.0f) {
-                buzzer_on(1000);
+            } else if (nivel > 70.0f) {
+                // Alerta de nível alto: beep intermitente
+                ligar_buzzer(1000);
                 vTaskDelay(pdMS_TO_TICKS(200));
-                buzzer_off();
+                desligar_buzzer();
                 vTaskDelay(pdMS_TO_TICKS(200));
-            }
-            // Nenhuma condição de alerta para o buzzer
-            else {
-                buzzer_off();
+            } else {
+                desligar_buzzer();
                 vTaskDelay(pdMS_TO_TICKS(50));
             }
         } else {
-            buzzer_off();
+            desligar_buzzer();
             vTaskDelay(pdMS_TO_TICKS(50));
         }
     }
 }
 
-// FUNÇÃO PRINCIPAL
+// --- FUNÇÃO PRINCIPAL ---
 int main() {
     stdio_init_all();
-    sleep_ms(2000);
+    sleep_ms(2000); // Aguarda inicialização do sistema
 
+    // Configura comunicação I2C
     i2c_init(I2C_PORT, 100 * 1000);
     gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
     gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(I2C_SDA_PIN);
     gpio_pull_up(I2C_SCL_PIN);
 
+    // Inicializa o display OLED
     ssd1306_init(&display, SSD1306_WIDTH, SSD1306_HEIGHT, false, SSD1306_I2C_ADDR, I2C_PORT);
     ssd1306_config(&display);
     ssd1306_fill(&display, false);
     ssd1306_draw_string(&display, "Iniciando...", 0, 28, false);
     ssd1306_send_data(&display);
 
-    inicializar_matriz_led();
+    inicializar_matriz_led(); // Inicializa a matriz de LEDs
 
-    filaDadosSensores = xQueueCreate(10, sizeof(dadosSensores_t));
-    filaDadosExibicao = xQueueCreate(5, sizeof(dadosPrevisao_t));
-    filaEstadoAlerta = xQueueCreate(1, sizeof(bool));
-    if (filaDadosSensores == NULL || filaDadosExibicao == NULL || filaEstadoAlerta == NULL) {
-        while(1);
+    // Cria as filas de comunicação
+    fila_dados_sensores = xQueueCreate(10, sizeof(dados_sensores_t));
+    fila_dados_exibicao = xQueueCreate(5, sizeof(dados_previsao_t));
+    fila_estado_alerta = xQueueCreate(1, sizeof(bool));
+    if (fila_dados_sensores == NULL || fila_dados_exibicao == NULL || fila_estado_alerta == NULL) {
+        while (1); // Trava se as filas não forem criadas
     }
 
-    xTaskCreate(TaskMedicao, "Leitura", 512, NULL, 2, NULL);
-    xTaskCreate(TaskPrevisao, "Previsao", configMINIMAL_STACK_SIZE + 256, NULL, 1, NULL);
-    xTaskCreate(TaskDisplay, "Exibicao", configMINIMAL_STACK_SIZE + 512, NULL, 1, NULL);
-    xTaskCreate(TaskMatrizLED, "MatrizLED", configMINIMAL_STACK_SIZE + 768, NULL, 1, NULL);
-    xTaskCreate(TaskBuzzer, "Buzzer", configMINIMAL_STACK_SIZE + 256, NULL, 1, NULL);
+    // Cria as tarefas do FreeRTOS
+    xTaskCreate(tarefa_medicao, "Leitura", 512, NULL, 2, NULL);
+    xTaskCreate(tarefa_previsao, "Previsao", configMINIMAL_STACK_SIZE + 256, NULL, 1, NULL);
+    xTaskCreate(tarefa_exibicao, "Exibicao", configMINIMAL_STACK_SIZE + 512, NULL, 1, NULL);
+    xTaskCreate(tarefa_matriz_led, "MatrizLED", configMINIMAL_STACK_SIZE + 768, NULL, 1, NULL);
+    xTaskCreate(tarefa_buzzer, "Buzzer", configMINIMAL_STACK_SIZE + 256, NULL, 1, NULL);
 
-    vTaskStartScheduler();
+    vTaskStartScheduler(); // Inicia o escalonador do FreeRTOS
 
     while (true) {
-        sleep_ms(1000);
+        sleep_ms(1000); // Loop infinito (nunca alcançado)
     }
 
     return 0;
