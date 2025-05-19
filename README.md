@@ -111,5 +111,3 @@ TempestadeRadar/
 ---
 
 Seja bem-vindo(a) ao **Tempestade Radar**! Este projeto foi criado para ajudar na prevenção de enchentes, e sua participação pode torná-lo ainda melhor. Clone o repositório, experimente as funcionalidades e sinta-se à vontade para enviar sugestões ou pull requests. Juntos, podemos fazer a diferença! 🚀
-```
-
